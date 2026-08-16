@@ -6,7 +6,7 @@ import axios from "axios";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const WIX_API_KEY = process.env.WIX_API_KEY;
 const WIX_SITE_ID = process.env.WIX_SITE_ID;
-const WIX_CATEGORY_ID = process.env.WIX_CATEGORY_ID; // 任意: 市況速報カテゴリのID
+const WIX_CATEGORY_ID = process.env.WIX_CATEGORY_ID;
 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const parser = new Parser();
@@ -14,10 +14,11 @@ const parser = new Parser();
 async function runPipeline() {
   console.log("【1/4】金融ニュースデータの収集開始...");
   
-  // Google News RSS（株式・為替・米国市場）
-  const feed = await parser.parseURL(
-    "https://news.google.com/rss/search?q=株式+為替+米国市場&hl=ja&gl=JP&ceid=JP:ja"
-  );
+  // 日本語クエリをURLエンコードして取得
+  const query = encodeURIComponent("株式 為替 米国市場");
+  const rssUrl = `https://news.google.com/rss/search?q=${query}&hl=ja&gl=JP&ceid=JP:ja`;
+  
+  const feed = await parser.parseURL(rssUrl);
   
   const topHeadlines = feed.items
     .slice(0, 6)
@@ -60,14 +61,12 @@ ${topHeadlines}
 
   console.log("【3/4】Wix Blog API（下書き作成）へ送信中...");
 
-  // Wix Draft Posts API エンドポイント
   const wixUrl = "https://www.wixapis.com/blog/v3/draft-posts";
 
   const payload = {
     draftPost: {
       title: postTitle,
       richContent: {
-        // WixのRichContentへプレーンHTMLまたはテキストを流し込む設定
         nodes: [
           {
             type: "PARAGRAPH",
