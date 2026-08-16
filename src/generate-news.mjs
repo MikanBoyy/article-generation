@@ -58,7 +58,6 @@ async function generateArticleWithGemini(prompt) {
     "models/gemini-pro-latest",
   ];
 
-  // 優先モデル + その他の利用可能モデル順に並べ替え
   const candidateModels = [
     ...priorityOrder.filter((m) => allModels.includes(m)),
     ...allModels.filter((m) => !priorityOrder.includes(m) && !m.includes("tts") && !m.includes("image")),
@@ -72,11 +71,7 @@ async function generateArticleWithGemini(prompt) {
       const genRes = await axios.post(
         generateUrl,
         {
-          contents: [
-            {
-              parts: [{ text: prompt }],
-            },
-          ],
+          contents: [{ parts: [{ text: prompt }] }],
         },
         {
           headers: { "Content-Type": "application/json" },
@@ -94,6 +89,27 @@ async function generateArticleWithGemini(prompt) {
   }
 
   throw new Error("すべてのGeminiモデルでの生成に失敗しました。");
+}
+
+// 3. Wixの投稿者ID（Author ID）を自動取得
+async function getWixAuthorId() {
+  try {
+    const res = await axios.get("https://www.wixapis.com/blog/v3/authors", {
+      headers: {
+        Authorization: WIX_API_KEY,
+        "wix-site-id": WIX_SITE_ID,
+      },
+    });
+
+    const authors = res.data.authors || [];
+    if (authors.length > 0) {
+      console.log(`Wixの投稿者IDを自動検出しました: ${authors[0].id}`);
+      return authors[0].id;
+    }
+  } catch (e) {
+    console.warn(`投稿者ID自動取得エラー: ${e.response?.data?.message || e.message}`);
+  }
+  return null;
 }
 
 async function runPipeline() {
@@ -135,43 +151,51 @@ ${topHeadlines}
 
   console.log("【3/4】Wix Blog API（下書き作成）へ送信中...");
 
+  const authorId = await getWixAuthorId();
+
   const wixUrl = "https://www.wixapis.com/blog/v3/draft-posts";
   const categoryList = WIX_CATEGORY_ID && WIX_CATEGORY_ID.trim().length > 0 ? [WIX_CATEGORY_ID.trim()] : [];
 
-  const payload = {
-    draftPost: {
-      title: postTitle,
-      richContent: {
-        nodes: [
-          {
-            type: "PARAGRAPH",
-            nodes: [
-              {
-                type: "TEXT",
-                textData: {
-                  text: articleHtml
-                    .replace(/<[^>]*>?/gm, "\n")
-                    .replace(/\n\s*\n/g, "\n\n")
-                    .trim(),
-                },
+  const draftPostObj = {
+    title: postTitle,
+    richContent: {
+      nodes: [
+        {
+          type: "PARAGRAPH",
+          nodes: [
+            {
+              type: "TEXT",
+              textData: {
+                text: articleHtml
+                  .replace(/<[^>]*>?/gm, "\n")
+                  .replace(/\n\s*\n/g, "\n\n")
+                  .trim(),
               },
-            ],
-          },
-        ],
-      },
-      categoryIds: categoryList,
+            },
+          ],
+        },
+      ],
     },
+    categoryIds: categoryList,
   };
 
-  const response = await axios.post(wixUrl, payload, {
-    headers: {
-      Authorization: WIX_API_KEY,
-      "wix-site-id": WIX_SITE_ID,
-      "Content-Type": "application/json",
-    },
-  });
+  if (authorId) {
+    draftPostObj.memberId = authorId;
+  }
 
-  console.log(`【4/4】Wixへの下書き投稿が完了しました！ (Post ID: ${response.data.draftPost?.id || "OK"})`);
+  const response = await axios.post(
+    wixUrl,
+    { draftPost: draftPostObj },
+    {
+      headers: {
+        Authorization: WIX_API_KEY,
+        "wix-site-id": WIX_SITE_ID,
+        "Content-Type": "application/json",
+      },
+    }
+  );
+
+  console.log(`【4/4】🎉 Wixへの下書き投稿が完了しました！ (Post ID: ${response.data.draftPost?.id || "OK"})`);
 }
 
 runPipeline().catch((err) => {
