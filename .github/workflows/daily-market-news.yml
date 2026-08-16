@@ -28,4 +28,5 @@ jobs:
           WIX_API_KEY: ${{ secrets.WIX_API_KEY }}
           WIX_SITE_ID: ${{ secrets.WIX_SITE_ID }}
           WIX_CATEGORY_ID: ${{ secrets.WIX_CATEGORY_ID }}
+          WIX_MEMBER_ID: ${{ secrets.WIX_MEMBER_ID }}
         run: npm start

@@ -56,6 +56,7 @@ async function generateArticleWithGemini(prompt) {
     .filter((m) => m.supportedGenerationMethods && m.supportedGenerationMethods.includes("generateContent"))
     .map((m) => m.name);
 
+  // 優先的に試行する推奨モデル順序（安定して動作する順）
   const priorityOrder = [
     "models/gemini-flash-latest",
     "models/gemini-pro-latest",
@@ -78,7 +79,7 @@ async function generateArticleWithGemini(prompt) {
         },
         {
           headers: { "Content-Type": "application/json" },
-          timeout: 45000,
+          timeout: 60000,
         }
       );
 
@@ -191,9 +192,10 @@ function parseMarkdownToWixNodes(mdText) {
   return nodes;
 }
 
-// 5. Wixの memberId（著者ID）を自動取得
+// 5. Wixの memberId（著者ID）を決定
 async function getWixMemberId() {
   if (WIX_MEMBER_ID && WIX_MEMBER_ID.trim().length > 0) {
+    console.log(`環境変数 WIX_MEMBER_ID を使用します: ${WIX_MEMBER_ID.trim()}`);
     return WIX_MEMBER_ID.trim();
   }
 
@@ -203,10 +205,10 @@ async function getWixMemberId() {
   };
 
   try {
-    const res = await axios.get("https://www.wixapis.com/blog/v3/draft-posts?paging.limit=1", { headers });
+    const res = await axios.get("https://www.wixapis.com/blog/v3/draft-posts?paging.limit=5", { headers });
     const drafts = res.data.draftPosts || [];
-    if (drafts.length > 0 && drafts[0].memberId) {
-      return drafts[0].memberId;
+    for (const d of drafts) {
+      if (d.memberId) return d.memberId;
     }
   } catch (e) {}
 
