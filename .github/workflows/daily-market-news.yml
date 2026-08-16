@@ -2,9 +2,18 @@ name: Daily Market News Generator (Wix)
 
 on:
   schedule:
-    # 毎日 UTC 21:30（日本時間 翌朝 06:30）
+    # 毎日 UTC 21:30（日本時間 翌朝 06:30）に自動起動
     - cron: '30 21 * * *'
-  workflow_dispatch: # GitHub管理画面からの手動実行用
+  workflow_dispatch:
+    inputs:
+      post_status:
+        description: '投稿ステータスを選択'
+        required: true
+        default: 'draft'
+        type: choice
+        options:
+          - draft
+          - publish
 
 jobs:
   build-and-run:
@@ -22,11 +31,13 @@ jobs:
       - name: 依存パッケージのインストール
         run: npm install
 
-      - name: 記事生成とWix下書き作成スクリプトの実行
+      - name: 記事生成とWix投稿スクリプトの実行
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           WIX_API_KEY: ${{ secrets.WIX_API_KEY }}
           WIX_SITE_ID: ${{ secrets.WIX_SITE_ID }}
           WIX_CATEGORY_ID: ${{ secrets.WIX_CATEGORY_ID }}
           WIX_MEMBER_ID: ${{ secrets.WIX_MEMBER_ID }}
+          # Cron実行時は 'publish'、手動実行(GUI)時は選択された値(デフォルト: draft)を適用
+          POST_STATUS: ${{ github.event_name == 'schedule' && 'publish' || github.event.inputs.post_status || 'draft' }}
         run: npm start
