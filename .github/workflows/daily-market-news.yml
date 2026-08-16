@@ -1,0 +1,32 @@
+name: Daily Market News Generator (Wix)
+
+on:
+  schedule:
+    # 毎日 UTC 21:30（日本時間 翌朝 06:30）
+    - cron: '30 21 * * *'
+  workflow_dispatch: # GitHub管理画面からの手動実行用
+
+jobs:
+  build-and-run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: リポジトリのチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Node.js のセットアップ
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: 依存パッケージのインストール
+        run: npm ci
+
+      - name: 記事生成とWix下書き作成スクリプトの実行
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          WIX_API_KEY: ${{ secrets.WIX_API_KEY }}
+          WIX_SITE_ID: ${{ secrets.WIX_SITE_ID }}
+          WIX_CATEGORY_ID: ${{ secrets.WIX_CATEGORY_ID }}
+        run: npm start
