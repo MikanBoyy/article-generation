@@ -29,9 +29,12 @@ async function fetchMarketNews() {
       console.log(`RSS取得試行中: ${url}`);
       const feed = await parser.parseURL(url);
       if (feed && feed.items && feed.items.length > 0) {
-        return feed.items.slice(0, 8).map((item, idx) => {
-          return `${idx + 1}. 【タイトル】${item.title}\n   【リンク】${item.link}\n   【概要】${item.contentSnippet || item.content || "速報ニュース"}`;
-        }).join("\n\n");
+        return feed.items
+          .slice(0, 8)
+          .map((item, idx) => {
+            return `${idx + 1}. 【タイトル】${item.title}\n   【リンク】${item.link}\n   【概要】${item.contentSnippet || item.content || "速報ニュース"}`;
+          })
+          .join("\n\n");
       }
     } catch (e) {
       console.warn(`RSS取得スキップ (${url}): ${e.message}`);
@@ -44,7 +47,7 @@ async function fetchMarketNews() {
 // 2. 利用可能なGeminiモデルで順次試行して記事生成
 async function generateArticleWithGemini(prompt) {
   console.log("利用可能なGeminiモデルをAPIから照会中...");
-  
+
   const modelsRes = await axios.get(
     `https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}`
   );
@@ -53,7 +56,6 @@ async function generateArticleWithGemini(prompt) {
     .filter((m) => m.supportedGenerationMethods && m.supportedGenerationMethods.includes("generateContent"))
     .map((m) => m.name);
 
-  // 優先的に試行する推奨モデル順序
   const priorityOrder = [
     "models/gemini-flash-latest",
     "models/gemini-pro-latest",
@@ -68,7 +70,7 @@ async function generateArticleWithGemini(prompt) {
     try {
       console.log(`記事生成を試行中: ${modelName}`);
       const generateUrl = `https://generativelanguage.googleapis.com/v1beta/${modelName}:generateContent?key=${GEMINI_API_KEY}`;
-      
+
       const genRes = await axios.post(
         generateUrl,
         {
@@ -93,10 +95,105 @@ async function generateArticleWithGemini(prompt) {
   throw new Error("すべてのGeminiモデルでの生成に失敗しました。");
 }
 
-// 3. Wixの memberId（著者ID）を自動取得
+// 3. インライン装飾（太字 **text**）のパース処理
+function parseInlines(text) {
+  const parts = text.split(/(\*\*.*?\*\*)/g);
+  const inlineNodes = [];
+
+  for (const part of parts) {
+    if (!part) continue;
+    if (part.startsWith("**") && part.endsWith("**") && part.length >= 4) {
+      inlineNodes.push({
+        type: "TEXT",
+        textData: {
+          text: part.slice(2, -2),
+          decorations: [{ type: "BOLD" }],
+        },
+      });
+    } else {
+      inlineNodes.push({
+        type: "TEXT",
+        textData: {
+          text: part,
+          decorations: [],
+        },
+      });
+    }
+  }
+
+  return inlineNodes.length > 0 ? inlineNodes : [{ type: "TEXT", textData: { text, decorations: [] } }];
+}
+
+// 4. MarkdownをWix RichContent（見出し・箇条書き・段落・区切り線）に変換
+function parseMarkdownToWixNodes(mdText) {
+  const lines = mdText.split("\n");
+  const nodes = [];
+  let currentBulletList = [];
+
+  const flushBulletList = () => {
+    if (currentBulletList.length > 0) {
+      const listItems = currentBulletList.map((itemText) => ({
+        type: "LIST_ITEM",
+        nodes: [
+          {
+            type: "PARAGRAPH",
+            nodes: parseInlines(itemText),
+          },
+        ],
+      }));
+      nodes.push({
+        type: "BULLETED_LIST",
+        nodes: listItems,
+      });
+      currentBulletList = [];
+    }
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      flushBulletList();
+      continue;
+    }
+
+    if (trimmed.startsWith("## ")) {
+      flushBulletList();
+      nodes.push({
+        type: "HEADING",
+        headingData: { level: 2 },
+        nodes: parseInlines(trimmed.slice(3).trim()),
+      });
+    } else if (trimmed.startsWith("### ")) {
+      flushBulletList();
+      nodes.push({
+        type: "HEADING",
+        headingData: { level: 3 },
+        nodes: parseInlines(trimmed.slice(4).trim()),
+      });
+    } else if (trimmed === "---" || trimmed === "***" || trimmed === "___") {
+      flushBulletList();
+      nodes.push({
+        type: "DIVIDER",
+        dividerData: { lineStyle: "SINGLE", width: "LARGE", alignment: "CENTER" },
+      });
+    } else if (trimmed.startsWith("* ") || trimmed.startsWith("- ")) {
+      currentBulletList.push(trimmed.slice(2).trim());
+    } else {
+      flushBulletList();
+      nodes.push({
+        type: "PARAGRAPH",
+        nodes: parseInlines(trimmed),
+      });
+    }
+  }
+
+  flushBulletList();
+  return nodes;
+}
+
+// 5. Wixの memberId（著者ID）を自動取得
 async function getWixMemberId() {
   if (WIX_MEMBER_ID && WIX_MEMBER_ID.trim().length > 0) {
-    console.log(`環境変数 WIX_MEMBER_ID を使用します: ${WIX_MEMBER_ID}`);
     return WIX_MEMBER_ID.trim();
   }
 
@@ -105,39 +202,15 @@ async function getWixMemberId() {
     "wix-site-id": WIX_SITE_ID,
   };
 
-  // ① 既存の公開記事から memberId を取得
-  try {
-    const res = await axios.get("https://www.wixapis.com/blog/v3/posts?paging.limit=1", { headers });
-    const posts = res.data.posts || [];
-    if (posts.length > 0 && posts[0].memberId) {
-      console.log(`公開記事から memberId を自動検出しました: ${posts[0].memberId}`);
-      return posts[0].memberId;
-    }
-  } catch (e) {}
-
-  // ② 既存の下書き記事から memberId を取得
   try {
     const res = await axios.get("https://www.wixapis.com/blog/v3/draft-posts?paging.limit=1", { headers });
     const drafts = res.data.draftPosts || [];
     if (drafts.length > 0 && drafts[0].memberId) {
-      console.log(`下書き記事から memberId を自動検出しました: ${drafts[0].memberId}`);
       return drafts[0].memberId;
     }
   } catch (e) {}
 
-  // ③ Members API から memberId を取得
-  try {
-    const res = await axios.get("https://www.wixapis.com/members/v1/members?paging.limit=1", { headers });
-    const members = res.data.members || [];
-    if (members.length > 0 && members[0].id) {
-      console.log(`サイトメンバー一覧から memberId を自動検出しました: ${members[0].id}`);
-      return members[0].id;
-    }
-  } catch (e) {}
-
-  throw new Error(
-    "Wixの投稿者情報（memberId）を自動特定できませんでした。Wix管理画面で1件記事（または下書き）を作成するか、GitHub Secrets に WIX_MEMBER_ID を追加してください。"
-  );
+  throw new Error("WixのmemberIdが取得できませんでした。GitHub Secrets に WIX_MEMBER_ID を設定してください。");
 }
 
 async function runPipeline() {
@@ -155,31 +228,34 @@ async function runPipeline() {
 
   const prompt = `
 あなたは金融メディア「投資の種」の専属マーケットアナリストです。
-入力された最新の金融・経済ニュース情報をもとに、読者（個人投資家・資産形成層）向けの日次市況サマリー記事（HTML形式）を作成してください。
+入力された最新の金融・経済ニュース情報をもとに、読者（個人投資家・資産形成層）向けの日次市況サマリー記事をMarkdown形式で作成してください。
 
 【入力ニュース情報】
 ${topHeadlines}
 
 【構成要件】
 - 読者が通勤時間等に3分で把握できる論理的かつ分かりやすい構成。
-- 出力は純粋なHTMLタグ文字列のみとし、Markdownのコードブロック（\`\`\`html など）は含めないでください。
-- 以下の構成で作成してください：
-  1. リード文（<p>タグで相場のポイントを簡潔に2〜3行で）
-  2. <h2>本日のマーケット動向・注目材料</h2>
-  3. <h3>主要トピックの解説（2〜3項目）</h3>
-  4. <h2>今後の注目イベント・経済指標</h2>
-  5. 免責事項（必須）：
-     <hr><p style="font-size:0.85em;color:#666;">※本記事は情報提供を目的としており、投資勧誘を目的としたものではありません。投資判断はご自身の責任で行ってください。<br>出典・引用：Yahoo!ニュース / 各社報道</p>
+- 純粋なMarkdownテキストのみを出力してください（\`\`\`markdown などのコードブロックは含めない）。
+- 以下の見出し構成・記法を厳守してください：
+  - 冒頭に相場の全体感を簡潔に2〜3行の段落で記述
+  - 大見出しは「## 本日のマーケット動向・注目材料」
+  - 中見出しは「### 1. トピック名」のように記載
+  - 箇条書きは「* **タイトル:** 解説内容」の形式
+  - 次の大見出しは「## 今後の注目イベント・経済指標」
+  - 最後に「---」で区切り、以下の免責事項を記載：
+    ※本記事は情報提供を目的としており、投資勧誘を目的としたものではありません。投資判断はご自身の責任で行ってください。
+    出典・引用：Yahoo!ニュース / 各社報道
 `;
 
-  const rawArticleHtml = await generateArticleWithGemini(prompt);
-  let articleHtml = rawArticleHtml.replace(/```html/g, "").replace(/```/g, "").trim();
+  const rawArticleMd = await generateArticleWithGemini(prompt);
+  const cleanMd = rawArticleMd.replace(/```markdown/g, "").replace(/```/g, "").trim();
 
   const postTitle = `【朝刊まとめ】${todayStr}の金融市場動向と注目ポイント`;
 
-  console.log("【3/4】Wix Blog API（下書き作成）へ送信中...");
+  console.log("【3/4】Wix RichContent形式に構造化して送信中...");
 
   const memberId = await getWixMemberId();
+  const richContentNodes = parseMarkdownToWixNodes(cleanMd);
 
   const wixUrl = "https://www.wixapis.com/blog/v3/draft-posts";
   const categoryList = WIX_CATEGORY_ID && WIX_CATEGORY_ID.trim().length > 0 ? [WIX_CATEGORY_ID.trim()] : [];
@@ -189,22 +265,7 @@ ${topHeadlines}
       title: postTitle,
       memberId: memberId,
       richContent: {
-        nodes: [
-          {
-            type: "PARAGRAPH",
-            nodes: [
-              {
-                type: "TEXT",
-                textData: {
-                  text: articleHtml
-                    .replace(/<[^>]*>?/gm, "\n")
-                    .replace(/\n\s*\n/g, "\n\n")
-                    .trim(),
-                },
-              },
-            ],
-          },
-        ],
+        nodes: richContentNodes,
       },
       categoryIds: categoryList,
     },
@@ -218,7 +279,7 @@ ${topHeadlines}
     },
   });
 
-  console.log(`【4/4】🎉 Wixへの下書き投稿が完了しました！ (Post ID: ${response.data.draftPost?.id || "OK"})`);
+  console.log(`【4/4】🎉 Wixへのリッチテキスト下書き投稿が完了しました！ (Post ID: ${response.data.draftPost?.id || "OK"})`);
 }
 
 runPipeline().catch((err) => {
