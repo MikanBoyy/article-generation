@@ -6,6 +6,7 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const WIX_API_KEY = process.env.WIX_API_KEY;
 const WIX_SITE_ID = process.env.WIX_SITE_ID;
 const WIX_CATEGORY_ID = process.env.WIX_CATEGORY_ID;
+const WIX_MEMBER_ID = process.env.WIX_MEMBER_ID;
 
 const parser = new Parser({
   headers: {
@@ -42,7 +43,7 @@ async function fetchMarketNews() {
 
 // 2. 利用可能なGeminiモデルで順次試行して記事生成
 async function generateArticleWithGemini(prompt) {
-  console.log("利用可能なGeminiモデルをAPIから自動照会中...");
+  console.log("利用可能なGeminiモデルをAPIから照会中...");
   
   const modelsRes = await axios.get(
     `https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}`
@@ -75,6 +76,7 @@ async function generateArticleWithGemini(prompt) {
         },
         {
           headers: { "Content-Type": "application/json" },
+          timeout: 45000,
         }
       );
 
@@ -91,25 +93,51 @@ async function generateArticleWithGemini(prompt) {
   throw new Error("すべてのGeminiモデルでの生成に失敗しました。");
 }
 
-// 3. Wixの投稿者ID（Author ID）を自動取得
-async function getWixAuthorId() {
-  try {
-    const res = await axios.get("https://www.wixapis.com/blog/v3/authors", {
-      headers: {
-        Authorization: WIX_API_KEY,
-        "wix-site-id": WIX_SITE_ID,
-      },
-    });
-
-    const authors = res.data.authors || [];
-    if (authors.length > 0) {
-      console.log(`Wixの投稿者IDを自動検出しました: ${authors[0].id}`);
-      return authors[0].id;
-    }
-  } catch (e) {
-    console.warn(`投稿者ID自動取得エラー: ${e.response?.data?.message || e.message}`);
+// 3. Wixの memberId（著者ID）を自動取得
+async function getWixMemberId() {
+  if (WIX_MEMBER_ID && WIX_MEMBER_ID.trim().length > 0) {
+    console.log(`環境変数 WIX_MEMBER_ID を使用します: ${WIX_MEMBER_ID}`);
+    return WIX_MEMBER_ID.trim();
   }
-  return null;
+
+  const headers = {
+    Authorization: WIX_API_KEY,
+    "wix-site-id": WIX_SITE_ID,
+  };
+
+  // ① 既存の公開記事から memberId を取得
+  try {
+    const res = await axios.get("https://www.wixapis.com/blog/v3/posts?paging.limit=1", { headers });
+    const posts = res.data.posts || [];
+    if (posts.length > 0 && posts[0].memberId) {
+      console.log(`公開記事から memberId を自動検出しました: ${posts[0].memberId}`);
+      return posts[0].memberId;
+    }
+  } catch (e) {}
+
+  // ② 既存の下書き記事から memberId を取得
+  try {
+    const res = await axios.get("https://www.wixapis.com/blog/v3/draft-posts?paging.limit=1", { headers });
+    const drafts = res.data.draftPosts || [];
+    if (drafts.length > 0 && drafts[0].memberId) {
+      console.log(`下書き記事から memberId を自動検出しました: ${drafts[0].memberId}`);
+      return drafts[0].memberId;
+    }
+  } catch (e) {}
+
+  // ③ Members API から memberId を取得
+  try {
+    const res = await axios.get("https://www.wixapis.com/members/v1/members?paging.limit=1", { headers });
+    const members = res.data.members || [];
+    if (members.length > 0 && members[0].id) {
+      console.log(`サイトメンバー一覧から memberId を自動検出しました: ${members[0].id}`);
+      return members[0].id;
+    }
+  } catch (e) {}
+
+  throw new Error(
+    "Wixの投稿者情報（memberId）を自動特定できませんでした。Wix管理画面で1件記事（または下書き）を作成するか、GitHub Secrets に WIX_MEMBER_ID を追加してください。"
+  );
 }
 
 async function runPipeline() {
@@ -151,49 +179,44 @@ ${topHeadlines}
 
   console.log("【3/4】Wix Blog API（下書き作成）へ送信中...");
 
-  const authorId = await getWixAuthorId();
+  const memberId = await getWixMemberId();
 
   const wixUrl = "https://www.wixapis.com/blog/v3/draft-posts";
   const categoryList = WIX_CATEGORY_ID && WIX_CATEGORY_ID.trim().length > 0 ? [WIX_CATEGORY_ID.trim()] : [];
 
-  const draftPostObj = {
-    title: postTitle,
-    richContent: {
-      nodes: [
-        {
-          type: "PARAGRAPH",
-          nodes: [
-            {
-              type: "TEXT",
-              textData: {
-                text: articleHtml
-                  .replace(/<[^>]*>?/gm, "\n")
-                  .replace(/\n\s*\n/g, "\n\n")
-                  .trim(),
+  const payload = {
+    draftPost: {
+      title: postTitle,
+      memberId: memberId,
+      richContent: {
+        nodes: [
+          {
+            type: "PARAGRAPH",
+            nodes: [
+              {
+                type: "TEXT",
+                textData: {
+                  text: articleHtml
+                    .replace(/<[^>]*>?/gm, "\n")
+                    .replace(/\n\s*\n/g, "\n\n")
+                    .trim(),
+                },
               },
-            },
-          ],
-        },
-      ],
+            ],
+          },
+        ],
+      },
+      categoryIds: categoryList,
     },
-    categoryIds: categoryList,
   };
 
-  if (authorId) {
-    draftPostObj.memberId = authorId;
-  }
-
-  const response = await axios.post(
-    wixUrl,
-    { draftPost: draftPostObj },
-    {
-      headers: {
-        Authorization: WIX_API_KEY,
-        "wix-site-id": WIX_SITE_ID,
-        "Content-Type": "application/json",
-      },
-    }
-  );
+  const response = await axios.post(wixUrl, payload, {
+    headers: {
+      Authorization: WIX_API_KEY,
+      "wix-site-id": WIX_SITE_ID,
+      "Content-Type": "application/json",
+    },
+  });
 
   console.log(`【4/4】🎉 Wixへの下書き投稿が完了しました！ (Post ID: ${response.data.draftPost?.id || "OK"})`);
 }
