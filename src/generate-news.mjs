@@ -44,55 +44,63 @@ async function fetchMarketNews() {
   throw new Error("すべてのニュースソースからの取得に失敗しました。");
 }
 
-// 2. 利用可能なGeminiモデルで順次試行して記事生成
+// 2. 指定モデル（gemini-flash-latest / gemini-pro-latest）による記事生成
 async function generateArticleWithGemini(prompt) {
-  console.log("利用可能なGeminiモデルをAPIから照会中...");
-
-  const modelsRes = await axios.get(
-    `https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}`
-  );
-
-  const allModels = (modelsRes.data.models || [])
-    .filter((m) => m.supportedGenerationMethods && m.supportedGenerationMethods.includes("generateContent"))
-    .map((m) => m.name);
-
+  // ユーザー指定の優先モデル
   const priorityOrder = [
     "models/gemini-flash-latest",
     "models/gemini-pro-latest",
   ];
 
-  const candidateModels = [
-    ...priorityOrder.filter((m) => allModels.includes(m)),
-    ...allModels.filter((m) => !priorityOrder.includes(m) && !m.includes("tts") && !m.includes("image")),
-  ];
+  const systemInstruction = `あなたは金融情報メディア「投資の種」の専属マーケットアナリストです。
+必ず【日本語】で記事を執筆してください。
+思考プロセス、考察メモ、英語の解説、マークダウンのコードブロック（\`\`\`markdown 等）は一切出力せず、指定された構成の【日本語の記事本文のみ】を出力してください。`;
 
-  for (const modelName of candidateModels) {
-    try {
-      console.log(`記事生成を試行中: ${modelName}`);
-      const generateUrl = `https://generativelanguage.googleapis.com/v1beta/${modelName}:generateContent?key=${GEMINI_API_KEY}`;
+  for (const modelName of priorityOrder) {
+    // 一時的な混雑（High demand）対策として各モデル最大3回リトライ
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        console.log(`記事生成を試行中: ${modelName} (試行回数: ${attempt}/3)`);
+        const generateUrl = `https://generativelanguage.googleapis.com/v1beta/${modelName}:generateContent?key=${GEMINI_API_KEY}`;
 
-      const genRes = await axios.post(
-        generateUrl,
-        {
-          contents: [{ parts: [{ text: prompt }] }],
-        },
-        {
-          headers: { "Content-Type": "application/json" },
-          timeout: 60000,
+        const genRes = await axios.post(
+          generateUrl,
+          {
+            systemInstruction: {
+              parts: [{ text: systemInstruction }],
+            },
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: {
+              temperature: 0.4,
+            },
+          },
+          {
+            headers: { "Content-Type": "application/json" },
+            timeout: 45000,
+          }
+        );
+
+        const text = genRes.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (text && text.trim().length > 0) {
+          console.log(`モデル [${modelName}] で記事生成に成功しました！`);
+          return text;
         }
-      );
+      } catch (err) {
+        const errMsg = err.response?.data?.error?.message || err.message;
+        console.warn(`モデル [${modelName}] 試行${attempt} エラー: ${errMsg}`);
 
-      const text = genRes.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (text && text.trim().length > 0) {
-        console.log(`モデル [${modelName}] で記事生成に成功しました！`);
-        return text;
+        // 一時的な混雑の場合は3秒待機して再試行
+        if (errMsg.includes("high demand") || errMsg.includes("503") || errMsg.includes("Resource has been exhausted")) {
+          console.log("混雑のため3秒待機して再試行します...");
+          await new Promise((resolve) => setTimeout(resolve, 3000));
+        } else {
+          break; // クォータ上限等の別エラーの場合は次のモデルへ移行
+        }
       }
-    } catch (err) {
-      console.warn(`モデル [${modelName}] でのエラー: ${err.response?.data?.error?.message || err.message}`);
     }
   }
 
-  throw new Error("すべてのGeminiモデルでの生成に失敗しました。");
+  throw new Error("指定されたGeminiモデルでの記事生成に失敗しました。");
 }
 
 // 3. インライン装飾（太字 **text**）のパース処理
@@ -191,56 +199,26 @@ function parseMarkdownToWixNodes(mdText) {
   return nodes;
 }
 
-// 5. Wixの有効な memberId をAPIから高精度に自動検出
+// 5. Wixの memberId を決定
 async function getWixMemberId() {
+  if (WIX_MEMBER_ID && WIX_MEMBER_ID.trim().length > 0) {
+    return WIX_MEMBER_ID.trim();
+  }
+
   const headers = {
     Authorization: WIX_API_KEY,
     "wix-site-id": WIX_SITE_ID,
   };
 
-  // ① Wix サイトメンバー一覧 API から探索
   try {
-    const res = await axios.get("https://www.wixapis.com/members/v1/members?paging.limit=10", { headers });
-    const members = res.data.members || [];
-    if (members.length > 0) {
-      console.log(`Members APIから有効な memberId を検出: ${members[0].id} (${members[0].profile?.nickname || "オーナー"})`);
-      return members[0].id;
-    }
-  } catch (e) {
-    console.warn(`Members API探索スキップ: ${e.response?.data?.message || e.message}`);
-  }
-
-  // ② 既存の下書き記事から探索
-  try {
-    const res = await axios.get("https://www.wixapis.com/blog/v3/draft-posts?paging.limit=10", { headers });
+    const res = await axios.get("https://www.wixapis.com/blog/v3/draft-posts?paging.limit=5", { headers });
     const drafts = res.data.draftPosts || [];
     for (const d of drafts) {
-      if (d.memberId) {
-        console.log(`既存下書きから有効な memberId を検出: ${d.memberId}`);
-        return d.memberId;
-      }
+      if (d.memberId) return d.memberId;
     }
   } catch (e) {}
 
-  // ③ 既存の公開記事から探索
-  try {
-    const res = await axios.get("https://www.wixapis.com/blog/v3/posts?paging.limit=10", { headers });
-    const posts = res.data.posts || [];
-    for (const p of posts) {
-      if (p.memberId) {
-        console.log(`既存公開記事から有効な memberId を検出: ${p.memberId}`);
-        return p.memberId;
-      }
-    }
-  } catch (e) {}
-
-  // ④ 最後のフォールバックとして環境変数を使用
-  if (WIX_MEMBER_ID && WIX_MEMBER_ID.trim().length > 0) {
-    console.log(`環境変数の WIX_MEMBER_ID を使用: ${WIX_MEMBER_ID.trim()}`);
-    return WIX_MEMBER_ID.trim();
-  }
-
-  throw new Error("Wixの有効なmemberIdを自動検出できませんでした。");
+  throw new Error("WixのmemberIdが取得できませんでした。GitHub Secrets に WIX_MEMBER_ID を設定してください。");
 }
 
 async function runPipeline() {
@@ -257,28 +235,39 @@ async function runPipeline() {
   });
 
   const prompt = `
-あなたは金融メディア「投資の種」の専属マーケットアナリストです。
-入力された最新の金融・経済ニュース情報をもとに、読者（個人投資家・資産形成層）向けの日次市況サマリー記事をMarkdown形式で作成してください。
+以下の最新ニュース情報をもとに、個人投資家・資産形成層に向けた日次市況サマリー記事を【日本語】で作成してください。
 
 【入力ニュース情報】
 ${topHeadlines}
 
-【構成要件】
-- 読者が通勤時間等に3分で把握できる論理的かつ分かりやすい構成。
-- 純粋なMarkdownテキストのみを出力してください（\`\`\`markdown などのコードブロックは含めない）。
-- 以下の見出し構成・記法を厳守してください：
-  - 冒頭に相場の全体感を簡潔に2〜3行の段落で記述
-  - 大見出しは「## 本日のマーケット動向・注目材料」
-  - 中見出しは「### 1. トピック名」のように記載
-  - 箇条書きは「* **タイトル:** 解説内容」の形式
-  - 次の大見出しは「## 今後の注目イベント・経済指標」
-  - 最後に「---」で区切り、以下の免責事項を記載：
-    ※本記事は情報提供を目的としており、投資勧誘を目的としたものではありません。投資判断はご自身の責任で行ってください。
-    出典・引用：Yahoo!ニュース / 各社報道
+【厳守する出力ルール】
+- 思考プロセスや前置き、解説などは一切含めず、記事本文のみを出力してください。
+- 出力は必ず以下の見出し・Markdown構造にしてください（コードブロック \`\`\` は使わない）：
+
+本日の経済・マーケット全体の動きを簡潔に2〜3行で要約したリード文。
+
+## 本日のマーケット動向・注目材料
+
+### 1. 主要トピック名
+* **ポイント見出し:** 投資家視点での解説内容。
+* **関連動向:** 市場や企業業績への影響。
+
+### 2. 主要トピック名
+* **ポイント見出し:** 投資家視点での解説内容。
+
+## 今後の注目イベント・経済指標
+* **注目ポイント:** 今後発表される主要指標や相場への影響。
+
+---
+※本記事は情報提供を目的としており、投資勧誘を目的としたものではありません。投資判断はご自身の責任で行ってください。
+出典・引用：Yahoo!ニュース / 各社報道
 `;
 
   const rawArticleMd = await generateArticleWithGemini(prompt);
-  const cleanMd = rawArticleMd.replace(/```markdown/g, "").replace(/```/g, "").trim();
+  const cleanMd = rawArticleMd
+    .replace(/```markdown/gi, "")
+    .replace(/```/g, "")
+    .trim();
 
   const postTitle = `【朝刊まとめ】${todayStr}の金融市場動向と注目ポイント`;
 
