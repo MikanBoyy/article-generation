@@ -7,6 +7,7 @@ const WIX_API_KEY = process.env.WIX_API_KEY;
 const WIX_SITE_ID = process.env.WIX_SITE_ID;
 const WIX_CATEGORY_ID = process.env.WIX_CATEGORY_ID;
 const WIX_MEMBER_ID = process.env.WIX_MEMBER_ID;
+const POST_STATUS = process.env.POST_STATUS || "draft"; // 'publish' または 'draft'
 
 const parser = new Parser({
   headers: {
@@ -49,7 +50,7 @@ async function fetchMarketNews() {
   return allHeadlines.join("\n\n");
 }
 
-// 2. Gemini APIによる高品質レポート生成（Flash系モデル順次試行）
+// 2. Gemini APIによる高品質レポート生成
 async function generateArticleWithGemini(prompt) {
   const priorityOrder = [
     "models/gemini-3.7-flash",
@@ -145,13 +146,12 @@ function createEmptyLineNode() {
   };
 }
 
-// 5. MarkdownをWix RichContentに変換（セクション間・見出し間に空白行を自動挿入）
+// 5. MarkdownをWix RichContentに変換（セクション・見出し間の余白制御）
 function parseMarkdownToWixNodes(mdText) {
   const lines = mdText.split("\n");
   const nodes = [];
   let currentBulletList = [];
 
-  // 直前が空行でない場合に空行ノードを挟むヘルパー
   const addNodeWithSpacing = (node, needTopSpacing = false) => {
     if (needTopSpacing && nodes.length > 0) {
       const lastNode = nodes[nodes.length - 1];
@@ -193,7 +193,6 @@ function parseMarkdownToWixNodes(mdText) {
 
     if (trimmed.startsWith("## ")) {
       flushBulletList();
-      // 大見出し（H2）の前には必ず空白行を挿入
       addNodeWithSpacing(
         {
           type: "HEADING",
@@ -202,11 +201,9 @@ function parseMarkdownToWixNodes(mdText) {
         },
         true
       );
-      // 大見出しの直後にも1行空ける
       nodes.push(createEmptyLineNode());
     } else if (trimmed.startsWith("### ")) {
       flushBulletList();
-      // 中見出し（H3）の前にも空白行を挿入
       addNodeWithSpacing(
         {
           type: "HEADING",
@@ -217,7 +214,6 @@ function parseMarkdownToWixNodes(mdText) {
       );
     } else if (trimmed === "---" || trimmed === "***" || trimmed === "___") {
       flushBulletList();
-      // 区切り線の前後に空白行を挿入
       addNodeWithSpacing(
         {
           type: "DIVIDER",
@@ -281,6 +277,7 @@ async function getWixMemberId() {
 }
 
 async function runPipeline() {
+  console.log(`【設定】投稿モード: ${POST_STATUS.toUpperCase()}`);
   console.log("【1/4】最新の金融・マクロ・国際ニュース収集開始...");
   const newsContext = await fetchMarketNews();
 
@@ -301,6 +298,11 @@ ${newsContext}
 
 【厳守する構成ルール】
 思考プロセスや前置きは一切含めず、以下のMarkdown構造のみを出力してください（コードブロック \`\`\` は使わない）：
+
+【AI自動生成に関するご案内】
+※本記事は生成AIを活用して各種金融・経済ニュースを自動収集・要約した速報レポートです。情報の正確性・完全性・即時性を保証するものではありません。投資判断等の最終決定は必ずご自身の責任で行ってください。
+
+---
 
 昨晩〜前日までの世界金融市場およびマクロ経済の動向を簡潔に総括したリード文（2〜3行の段落）。全体的な地合いや投資家心理のトーンを明記。
 
@@ -346,7 +348,7 @@ ${newsContext}
 
   const postTitle = `【朝刊まとめ】${todayStr}の金融市場動向と世界3大市場の着目ポイント`;
 
-  console.log("【3/4】Wix RichContent形式に構造化（余白制御）して送信中...");
+  console.log("【3/4】Wix RichContent形式に構造化して送信中...");
 
   const memberId = await getWixMemberId();
   const richContentNodes = parseMarkdownToWixNodes(cleanMd);
@@ -365,6 +367,7 @@ ${newsContext}
     },
   };
 
+  // 1. まず下書き（Draft）を作成
   const response = await axios.post(wixUrl, payload, {
     headers: {
       Authorization: WIX_API_KEY,
@@ -373,7 +376,28 @@ ${newsContext}
     },
   });
 
-  console.log(`【4/4】🎉 Wixへの高品質レポート下書き投稿が完了しました！ (Post ID: ${response.data.draftPost?.id || "OK"})`);
+  const draftId = response.data.draftPost?.id;
+  console.log(`下書き作成完了 (Draft ID: ${draftId || "OK"})`);
+
+  // 2. POST_STATUS が 'publish' の場合は即時公開
+  if (POST_STATUS === "publish" && draftId) {
+    console.log("【4/4】公開モード（publish）のため、記事を即時公開します...");
+    const publishUrl = `https://www.wixapis.com/blog/v3/draft-posts/${draftId}/publish`;
+    await axios.post(
+      publishUrl,
+      {},
+      {
+        headers: {
+          Authorization: WIX_API_KEY,
+          "wix-site-id": WIX_SITE_ID,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+    console.log(`🎉 記事を公開（Published）しました！ (Post ID: ${draftId})`);
+  } else {
+    console.log(`🎉 記事を下書き（Draft）として保存しました！ (Draft ID: ${draftId})`);
+  }
 }
 
 runPipeline().catch((err) => {
