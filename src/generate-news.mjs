@@ -10,7 +10,6 @@ const WIX_CATEGORY_ID = process.env.WIX_CATEGORY_ID;
 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
-// User-Agentヘッダーを付与したRSSパーサーの設定
 const parser = new Parser({
   headers: {
     "User-Agent":
@@ -20,8 +19,8 @@ const parser = new Parser({
   timeout: 10000,
 });
 
+// 1. 金融・経済ニュースの収集
 async function fetchMarketNews() {
-  // 安定して取得できる金融・経済ニュースRSS（Yahoo!ニュース 経済トピックス）
   const rssSources = [
     "https://news.yahoo.co.jp/rss/topics/business.xml",
     "https://www3.nhk.or.jp/rss/news/cat6.xml",
@@ -37,11 +36,38 @@ async function fetchMarketNews() {
         }).join("\n\n");
       }
     } catch (e) {
-      console.warn(`RSS取得失敗 (${url}): ${e.message}。次のソースを試します。`);
+      console.warn(`RSS取得スキップ (${url}): ${e.message}`);
     }
   }
 
   throw new Error("すべてのニュースソースからの取得に失敗しました。");
+}
+
+// 2. Gemini APIによる記事生成（フォールバック対応）
+async function generateArticleWithGemini(prompt) {
+  const candidateModels = [
+    "gemini-2.0-flash",
+    "gemini-1.5-pro",
+    "gemini-1.5-flash-002",
+    "gemini-pro"
+  ];
+
+  for (const modelName of candidateModels) {
+    try {
+      console.log(`Gemini モデル試行中: ${modelName}`);
+      const model = genAI.getGenerativeModel({ model: modelName });
+      const result = await model.generateContent(prompt);
+      const text = result.response.text();
+      if (text && text.trim().length > 0) {
+        console.log(`モデル [${modelName}] で記事生成に成功しました。`);
+        return text;
+      }
+    } catch (err) {
+      console.warn(`モデル [${modelName}] 失敗: ${err.message}。次のモデルを試します。`);
+    }
+  }
+
+  throw new Error("利用可能なすべてのGeminiモデルでの記事生成に失敗しました。");
 }
 
 async function runPipeline() {
@@ -49,7 +75,6 @@ async function runPipeline() {
   const topHeadlines = await fetchMarketNews();
 
   console.log("【2/4】Gemini APIによる記事生成中...");
-  const model = genAI.getGenerativeModel({ model: "gemini-3-flash" });
 
   const todayStr = new Date().toLocaleDateString("ja-JP", {
     timeZone: "Asia/Tokyo",
@@ -77,16 +102,14 @@ ${topHeadlines}
      <hr><p style="font-size:0.85em;color:#666;">※本記事は情報提供を目的としており、投資勧誘を目的としたものではありません。投資判断はご自身の責任で行ってください。<br>出典・引用：Yahoo!ニュース / 各社報道</p>
 `;
 
-  const result = await model.generateContent(prompt);
-  let articleHtml = result.response.text();
-  articleHtml = articleHtml.replace(/```html/g, "").replace(/```/g, "").trim();
+  const rawArticleHtml = await generateArticleWithGemini(prompt);
+  let articleHtml = rawArticleHtml.replace(/```html/g, "").replace(/```/g, "").trim();
 
   const postTitle = `【朝刊まとめ】${todayStr}の金融市場動向と注目ポイント`;
 
   console.log("【3/4】Wix Blog API（下書き作成）へ送信中...");
 
   const wixUrl = "https://www.wixapis.com/blog/v3/draft-posts";
-
   const categoryList = WIX_CATEGORY_ID && WIX_CATEGORY_ID.trim().length > 0 ? [WIX_CATEGORY_ID.trim()] : [];
 
   const payload = {
