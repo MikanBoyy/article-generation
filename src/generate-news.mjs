@@ -25,8 +25,8 @@ async function runPipeline() {
     .join("\n");
 
   console.log("【2/4】Gemini APIによる記事生成中...");
-  // 最新のFlashモデルを指定
-  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+  // 最新の gemini-3-flash モデルを指定
+  const model = genAI.getGenerativeModel({ model: "gemini-3-flash" });
 
   const todayStr = new Date().toLocaleDateString("ja-JP", {
     timeZone: "Asia/Tokyo",
