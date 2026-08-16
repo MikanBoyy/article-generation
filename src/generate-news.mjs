@@ -94,7 +94,7 @@ async function generateArticleWithGemini(prompt) {
           console.log("混雑のため2秒待機して再試行します...");
           await new Promise((resolve) => setTimeout(resolve, 2000));
         } else {
-          break; // クォータ制限などの場合は即座に次のモデルへフォールバック
+          break;
         }
       }
     }
@@ -199,26 +199,56 @@ function parseMarkdownToWixNodes(mdText) {
   return nodes;
 }
 
-// 5. Wixの memberId を決定
+// 5. Wix APIから有効な memberId を確実に自動検出
 async function getWixMemberId() {
-  if (WIX_MEMBER_ID && WIX_MEMBER_ID.trim().length > 0) {
-    return WIX_MEMBER_ID.trim();
-  }
-
   const headers = {
     Authorization: WIX_API_KEY,
     "wix-site-id": WIX_SITE_ID,
   };
 
+  // ① 既存の下書き記事から自動取得
   try {
-    const res = await axios.get("https://www.wixapis.com/blog/v3/draft-posts?paging.limit=5", { headers });
+    const res = await axios.get("https://www.wixapis.com/blog/v3/draft-posts?paging.limit=10", { headers });
     const drafts = res.data.draftPosts || [];
     for (const d of drafts) {
-      if (d.memberId) return d.memberId;
+      if (d.memberId) {
+        console.log(`下書き記事から有効な memberId を自動検出: ${d.memberId}`);
+        return d.memberId;
+      }
     }
   } catch (e) {}
 
-  throw new Error("WixのmemberIdが取得できませんでした。GitHub Secrets に WIX_MEMBER_ID を設定してください。");
+  // ② 既存の公開記事から自動取得
+  try {
+    const res = await axios.get("https://www.wixapis.com/blog/v3/posts?paging.limit=10", { headers });
+    const posts = res.data.posts || [];
+    for (const p of posts) {
+      if (p.memberId) {
+        console.log(`公開記事から有効な memberId を自動検出: ${p.memberId}`);
+        return p.memberId;
+      }
+    }
+  } catch (e) {}
+
+  // ③ サイトメンバー一覧 API から自動取得
+  try {
+    const res = await axios.get("https://www.wixapis.com/members/v1/members?paging.limit=10", { headers });
+    const members = res.data.members || [];
+    if (members.length > 0 && members[0].id) {
+      console.log(`サイトメンバーAPIから有効な memberId を自動検出: ${members[0].id}`);
+      return members[0].id;
+    }
+  } catch (e) {}
+
+  // ④ フォールバックとして環境変数を使用
+  if (WIX_MEMBER_ID && WIX_MEMBER_ID.trim().length > 0) {
+    console.log(`環境変数 WIX_MEMBER_ID を使用: ${WIX_MEMBER_ID.trim()}`);
+    return WIX_MEMBER_ID.trim();
+  }
+
+  throw new Error(
+    "Wixの有効なmemberIdが見つかりませんでした。Wixダッシュボードのブログ管理画面でタイトルだけの「テスト下書き」を1件保存してから再実行してください。"
+  );
 }
 
 async function runPipeline() {
