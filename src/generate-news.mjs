@@ -14,7 +14,6 @@ const parser = new Parser();
 async function runPipeline() {
   console.log("【1/4】金融ニュースデータの収集開始...");
   
-  // 日本語クエリをURLエンコードして取得
   const query = encodeURIComponent("株式 為替 米国市場");
   const rssUrl = `https://news.google.com/rss/search?q=${query}&hl=ja&gl=JP&ceid=JP:ja`;
   
@@ -26,7 +25,8 @@ async function runPipeline() {
     .join("\n");
 
   console.log("【2/4】Gemini APIによる記事生成中...");
-  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+  // 安定版の flash モデルを指定
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
 
   const todayStr = new Date().toLocaleDateString("ja-JP", {
     timeZone: "Asia/Tokyo",
@@ -100,6 +100,6 @@ ${topHeadlines}
 }
 
 runPipeline().catch((err) => {
-  console.error("パイプライン実行エラー:", err.response?.data || err.message);
+  console.error("パイプライン実行エラー:", err.response?.data ? JSON.stringify(err.response.data) : err.message);
   process.exit(1);
 });
