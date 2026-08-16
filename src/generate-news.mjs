@@ -17,34 +17,39 @@ const parser = new Parser({
   timeout: 10000,
 });
 
-// 1. 金融・経済ニュースの収集
+// 1. 金融・経済・国際ニュースの多角収集
 async function fetchMarketNews() {
   const rssSources = [
-    "https://news.yahoo.co.jp/rss/topics/business.xml",
-    "https://www3.nhk.or.jp/rss/news/cat6.xml",
+    "https://news.yahoo.co.jp/rss/topics/business.xml", // 経済トピックス
+    "https://news.yahoo.co.jp/rss/topics/world.xml",    // 国際情勢・地政学
+    "https://www3.nhk.or.jp/rss/news/cat6.xml",         // NHK 経済
   ];
+
+  const allHeadlines = [];
 
   for (const url of rssSources) {
     try {
-      console.log(`RSS取得試行中: ${url}`);
+      console.log(`RSS取得中: ${url}`);
       const feed = await parser.parseURL(url);
       if (feed && feed.items && feed.items.length > 0) {
-        return feed.items
-          .slice(0, 8)
-          .map((item, idx) => {
-            return `${idx + 1}. 【タイトル】${item.title}\n   【リンク】${item.link}\n   【概要】${item.contentSnippet || item.content || "速報ニュース"}`;
-          })
-          .join("\n\n");
+        const top = feed.items.slice(0, 5).map((item) => {
+          return `- 【${item.title}】\n  概要: ${item.contentSnippet || item.content || "速報"}\n  URL: ${item.link}`;
+        });
+        allHeadlines.push(...top);
       }
     } catch (e) {
       console.warn(`RSS取得スキップ (${url}): ${e.message}`);
     }
   }
 
-  throw new Error("すべてのニュースソースからの取得に失敗しました。");
+  if (allHeadlines.length === 0) {
+    throw new Error("すべてのニュースソースからの取得に失敗しました。");
+  }
+
+  return allHeadlines.join("\n\n");
 }
 
-// 2. 無料枠で確実に動作する Flash 系モデル群による記事生成
+// 2. Gemini APIによる高品質レポート生成
 async function generateArticleWithGemini(prompt) {
   const priorityOrder = [
     "models/gemini-3.7-flash",
@@ -54,14 +59,14 @@ async function generateArticleWithGemini(prompt) {
     "models/gemini-3.1-flash-lite",
   ];
 
-  const systemInstruction = `あなたは金融情報メディア「投資の種」の専属マーケットアナリストです。
-必ず【日本語】で記事を執筆してください。
-思考プロセス、考察メモ、英語の解説、マークダウンのコードブロック（\`\`\`markdown 等）は一切出力せず、指定された構成の【日本語の記事本文のみ】を出力してください。`;
+  const systemInstruction = `あなたは金融情報メディア「投資の種」の専属シニアマーケットアナリストです。
+投資初心者から中上級の個人投資家に向けて、論理的かつ示唆に富んだ市況レポートを【日本語】で作成してください。
+思考プロセスや英語の解説、マークダウンのコードブロック（\`\`\`markdown 等）は一切出力せず、指定された構成の【日本語の記事本文のみ】を出力してください。`;
 
   for (const modelName of priorityOrder) {
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        console.log(`記事生成を試行中: ${modelName} (試行回数: ${attempt}/2)`);
+        console.log(`記事生成を試行中: ${modelName} (試行: ${attempt}/2)`);
         const generateUrl = `https://generativelanguage.googleapis.com/v1beta/${modelName}:generateContent?key=${GEMINI_API_KEY}`;
 
         const genRes = await axios.post(
@@ -72,7 +77,7 @@ async function generateArticleWithGemini(prompt) {
             },
             contents: [{ parts: [{ text: prompt }] }],
             generationConfig: {
-              temperature: 0.3,
+              temperature: 0.35,
             },
           },
           {
@@ -83,7 +88,7 @@ async function generateArticleWithGemini(prompt) {
 
         const text = genRes.data?.candidates?.[0]?.content?.parts?.[0]?.text;
         if (text && text.trim().length > 0) {
-          console.log(`モデル [${modelName}] で記事生成に成功しました！`);
+          console.log(`モデル [${modelName}] で高品質記事の生成に成功しました！`);
           return text;
         }
       } catch (err) {
@@ -100,7 +105,7 @@ async function generateArticleWithGemini(prompt) {
     }
   }
 
-  throw new Error("利用可能なすべてのGeminiモデルでの記事生成に失敗しました。");
+  throw new Error("利用可能なGeminiモデルでの記事生成に失敗しました。");
 }
 
 // 3. インライン装飾（太字 **text**）のパース処理
@@ -199,7 +204,7 @@ function parseMarkdownToWixNodes(mdText) {
   return nodes;
 }
 
-// 5. Wix APIから有効な memberId を確実に自動検出
+// 5. Wix APIから有効な memberId を確実に取得
 async function getWixMemberId() {
   const headers = {
     Authorization: WIX_API_KEY,
@@ -211,10 +216,7 @@ async function getWixMemberId() {
     const res = await axios.get("https://www.wixapis.com/blog/v3/draft-posts?paging.limit=10", { headers });
     const drafts = res.data.draftPosts || [];
     for (const d of drafts) {
-      if (d.memberId) {
-        console.log(`下書き記事から有効な memberId を自動検出: ${d.memberId}`);
-        return d.memberId;
-      }
+      if (d.memberId) return d.memberId;
     }
   } catch (e) {}
 
@@ -223,39 +225,30 @@ async function getWixMemberId() {
     const res = await axios.get("https://www.wixapis.com/blog/v3/posts?paging.limit=10", { headers });
     const posts = res.data.posts || [];
     for (const p of posts) {
-      if (p.memberId) {
-        console.log(`公開記事から有効な memberId を自動検出: ${p.memberId}`);
-        return p.memberId;
-      }
+      if (p.memberId) return p.memberId;
     }
   } catch (e) {}
 
-  // ③ サイトメンバー一覧 API から自動取得
+  // ③ サイトメンバーAPIから自動取得
   try {
     const res = await axios.get("https://www.wixapis.com/members/v1/members?paging.limit=10", { headers });
     const members = res.data.members || [];
-    if (members.length > 0 && members[0].id) {
-      console.log(`サイトメンバーAPIから有効な memberId を自動検出: ${members[0].id}`);
-      return members[0].id;
-    }
+    if (members.length > 0 && members[0].id) return members[0].id;
   } catch (e) {}
 
-  // ④ フォールバックとして環境変数を使用
+  // ④ フォールバック
   if (WIX_MEMBER_ID && WIX_MEMBER_ID.trim().length > 0) {
-    console.log(`環境変数 WIX_MEMBER_ID を使用: ${WIX_MEMBER_ID.trim()}`);
     return WIX_MEMBER_ID.trim();
   }
 
-  throw new Error(
-    "Wixの有効なmemberIdが見つかりませんでした。Wixダッシュボードのブログ管理画面でタイトルだけの「テスト下書き」を1件保存してから再実行してください。"
-  );
+  throw new Error("WixのmemberIdを検出できませんでした。");
 }
 
 async function runPipeline() {
-  console.log("【1/4】金融ニュースデータの収集開始...");
-  const topHeadlines = await fetchMarketNews();
+  console.log("【1/4】最新の金融・マクロ・国際ニュース収集開始...");
+  const newsContext = await fetchMarketNews();
 
-  console.log("【2/4】Gemini APIによる記事生成中...");
+  console.log("【2/4】Gemini APIによる構造化レポート生成中...");
 
   const todayStr = new Date().toLocaleDateString("ja-JP", {
     timeZone: "Asia/Tokyo",
@@ -265,32 +258,48 @@ async function runPipeline() {
   });
 
   const prompt = `
-以下の最新ニュース情報をもとに、個人投資家・資産形成層に向けた日次市況サマリー記事を【日本語】で作成してください。
+以下の最新ニュース情報をもとに、金融メディア「投資の種」に掲載する日次マーケットレポートを【日本語】で作成してください。
 
 【入力ニュース情報】
-${topHeadlines}
+${newsContext}
 
-【厳守する出力ルール】
-- 思考プロセスや前置き、解説などは一切含めず、記事本文のみを出力してください。
-- 出力は必ず以下の見出し・Markdown構造にしてください（コードブロック \`\`\` は使わない）：
+【厳守する構成ルール】
+思考プロセスや前置きは一切含めず、以下のMarkdown構造のみを出力してください（コードブロック \`\`\` は使わない）：
 
-本日の経済・マーケット全体の動きを簡潔に2〜3行で要約したリード文。
+昨晩〜本日早朝までの世界金融市場およびマクロ経済の動向を簡潔に総括したリード文（2〜3行の段落）。全体的な地合いや投資家心理のトーンを明記。
 
-## 本日のマーケット動向・注目材料
+## 1. 金融市場を動かす4大観点サマリー
 
-### 1. 主要トピック名
-* **ポイント見出し:** 投資家視点での解説内容。
-* **関連動向:** 市場や企業業績への影響。
+### マクロ経済・金融政策
+* **金融政策・金利動向:** 主要中銀（FRB・日銀・ECB等）の動向や金利・インフレに関する材料と分析。
+* **経済指標の影響:** 発表された景気データやマクロ動向の要約。
 
-### 2. 主要トピック名
-* **ポイント見出し:** 投資家視点での解説内容。
+### 地政学リスク・要人発言
+* **国際情勢・政策動向:** 国際関係、貿易、安全保障などの地政学的リスク。
+* **要人発言の示唆:** 政策担当者や金融首脳の発言が相場に与える影響。
 
-## 今後の注目イベント・経済指標
-* **注目ポイント:** 今後発表される主要指標や相場への影響。
+### 企業業績・個別テーマ
+* **セクター動向・注目企業:** 決算動向や主力銘柄・AI/半導体等のテーマ株の動き。
+* **ビジネス・産業の変化:** 投資家が注目すべき業界トレンド。
+
+### 投資家心理・市場データ
+* **リスクセンチメント:** 市場のリスクオン/リスクオフの度合いと資金フロー。
+* **為替・コモディティの相関:** ドル円動向や原油・ゴールドなどの材料整理。
+
+## 2. 本日（11時以降）の世界3大市場・着目ポイント
+
+### 日本市場（後場〜大引け）
+* **後場の焦点:** 前場の流れを受けた日経平均・TOPIXの方向感、後場の需給要因、大引けに向けた注意点。
+
+### ロンドン市場（欧州時間）
+* **欧州時間の材料:** 欧州主要株価指数、英ポンドやユーロの動向、欧州時間発表の経済指標や中銀要人発言への警戒感。
+
+### ニューヨーク市場（米国時間）
+* **米国時間の展望:** 米国市場開始前の先物動向、今晩発表予定の主要経済指標、米長期金利の推移と株式市場への波及シナリオ。
 
 ---
 ※本記事は情報提供を目的としており、投資勧誘を目的としたものではありません。投資判断はご自身の責任で行ってください。
-出典・引用：Yahoo!ニュース / 各社報道
+出典・引用：Yahoo!ニュース / NHK NEWS / 各社報道
 `;
 
   const rawArticleMd = await generateArticleWithGemini(prompt);
@@ -299,7 +308,7 @@ ${topHeadlines}
     .replace(/```/g, "")
     .trim();
 
-  const postTitle = `【朝刊まとめ】${todayStr}の金融市場動向と注目ポイント`;
+  const postTitle = `【朝刊まとめ】${todayStr}の金融市場動向と世界3大市場の着目ポイント`;
 
   console.log("【3/4】Wix RichContent形式に構造化して送信中...");
 
@@ -328,7 +337,7 @@ ${topHeadlines}
     },
   });
 
-  console.log(`【4/4】🎉 Wixへのリッチテキスト下書き投稿が完了しました！ (Post ID: ${response.data.draftPost?.id || "OK"})`);
+  console.log(`【4/4】🎉 Wixへの高品質レポート下書き投稿が完了しました！ (Post ID: ${response.data.draftPost?.id || "OK"})`);
 }
 
 runPipeline().catch((err) => {
