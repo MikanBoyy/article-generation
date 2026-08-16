@@ -49,7 +49,7 @@ async function fetchMarketNews() {
   return allHeadlines.join("\n\n");
 }
 
-// 2. Gemini APIによる高品質レポート生成
+// 2. Gemini APIによる高品質レポート生成（Flash系モデル順次試行）
 async function generateArticleWithGemini(prompt) {
   const priorityOrder = [
     "models/gemini-3.7-flash",
@@ -137,11 +137,33 @@ function parseInlines(text) {
   return inlineNodes.length > 0 ? inlineNodes : [{ type: "TEXT", textData: { text, decorations: [] } }];
 }
 
-// 4. MarkdownをWix RichContent（見出し・箇条書き・段落・区切り線）に変換
+// 4. 空白行（空の段落ノード）の生成ヘルパー
+function createEmptyLineNode() {
+  return {
+    type: "PARAGRAPH",
+    nodes: [{ type: "TEXT", textData: { text: "", decorations: [] } }],
+  };
+}
+
+// 5. MarkdownをWix RichContentに変換（セクション間・見出し間に空白行を自動挿入）
 function parseMarkdownToWixNodes(mdText) {
   const lines = mdText.split("\n");
   const nodes = [];
   let currentBulletList = [];
+
+  // 直前が空行でない場合に空行ノードを挟むヘルパー
+  const addNodeWithSpacing = (node, needTopSpacing = false) => {
+    if (needTopSpacing && nodes.length > 0) {
+      const lastNode = nodes[nodes.length - 1];
+      const isLastEmpty =
+        lastNode.type === "PARAGRAPH" &&
+        lastNode.nodes?.[0]?.textData?.text === "";
+      if (!isLastEmpty) {
+        nodes.push(createEmptyLineNode());
+      }
+    }
+    nodes.push(node);
+  };
 
   const flushBulletList = () => {
     if (currentBulletList.length > 0) {
@@ -171,32 +193,50 @@ function parseMarkdownToWixNodes(mdText) {
 
     if (trimmed.startsWith("## ")) {
       flushBulletList();
-      nodes.push({
-        type: "HEADING",
-        headingData: { level: 2 },
-        nodes: parseInlines(trimmed.slice(3).trim()),
-      });
+      // 大見出し（H2）の前には必ず空白行を挿入
+      addNodeWithSpacing(
+        {
+          type: "HEADING",
+          headingData: { level: 2 },
+          nodes: parseInlines(trimmed.slice(3).trim()),
+        },
+        true
+      );
+      // 大見出しの直後にも1行空ける
+      nodes.push(createEmptyLineNode());
     } else if (trimmed.startsWith("### ")) {
       flushBulletList();
-      nodes.push({
-        type: "HEADING",
-        headingData: { level: 3 },
-        nodes: parseInlines(trimmed.slice(4).trim()),
-      });
+      // 中見出し（H3）の前にも空白行を挿入
+      addNodeWithSpacing(
+        {
+          type: "HEADING",
+          headingData: { level: 3 },
+          nodes: parseInlines(trimmed.slice(4).trim()),
+        },
+        true
+      );
     } else if (trimmed === "---" || trimmed === "***" || trimmed === "___") {
       flushBulletList();
-      nodes.push({
-        type: "DIVIDER",
-        dividerData: { lineStyle: "SINGLE", width: "LARGE", alignment: "CENTER" },
-      });
+      // 区切り線の前後に空白行を挿入
+      addNodeWithSpacing(
+        {
+          type: "DIVIDER",
+          dividerData: { lineStyle: "SINGLE", width: "LARGE", alignment: "CENTER" },
+        },
+        true
+      );
+      nodes.push(createEmptyLineNode());
     } else if (trimmed.startsWith("* ") || trimmed.startsWith("- ")) {
       currentBulletList.push(trimmed.slice(2).trim());
     } else {
       flushBulletList();
-      nodes.push({
-        type: "PARAGRAPH",
-        nodes: parseInlines(trimmed),
-      });
+      addNodeWithSpacing(
+        {
+          type: "PARAGRAPH",
+          nodes: parseInlines(trimmed),
+        },
+        false
+      );
     }
   }
 
@@ -204,14 +244,13 @@ function parseMarkdownToWixNodes(mdText) {
   return nodes;
 }
 
-// 5. Wix APIから有効な memberId を確実に取得
+// 6. Wix APIから有効な memberId を確実に取得
 async function getWixMemberId() {
   const headers = {
     Authorization: WIX_API_KEY,
     "wix-site-id": WIX_SITE_ID,
   };
 
-  // ① 既存の下書き記事から自動取得
   try {
     const res = await axios.get("https://www.wixapis.com/blog/v3/draft-posts?paging.limit=10", { headers });
     const drafts = res.data.draftPosts || [];
@@ -220,7 +259,6 @@ async function getWixMemberId() {
     }
   } catch (e) {}
 
-  // ② 既存の公開記事から自動取得
   try {
     const res = await axios.get("https://www.wixapis.com/blog/v3/posts?paging.limit=10", { headers });
     const posts = res.data.posts || [];
@@ -229,14 +267,12 @@ async function getWixMemberId() {
     }
   } catch (e) {}
 
-  // ③ サイトメンバーAPIから自動取得
   try {
     const res = await axios.get("https://www.wixapis.com/members/v1/members?paging.limit=10", { headers });
     const members = res.data.members || [];
     if (members.length > 0 && members[0].id) return members[0].id;
   } catch (e) {}
 
-  // ④ フォールバック
   if (WIX_MEMBER_ID && WIX_MEMBER_ID.trim().length > 0) {
     return WIX_MEMBER_ID.trim();
   }
@@ -266,7 +302,7 @@ ${newsContext}
 【厳守する構成ルール】
 思考プロセスや前置きは一切含めず、以下のMarkdown構造のみを出力してください（コードブロック \`\`\` は使わない）：
 
-昨晩〜本日早朝までの世界金融市場およびマクロ経済の動向を簡潔に総括したリード文（2〜3行の段落）。全体的な地合いや投資家心理のトーンを明記。
+昨晩〜前日までの世界金融市場およびマクロ経済の動向を簡潔に総括したリード文（2〜3行の段落）。全体的な地合いや投資家心理のトーンを明記。
 
 ## 1. 金融市場を動かす4大観点サマリー
 
@@ -310,7 +346,7 @@ ${newsContext}
 
   const postTitle = `【朝刊まとめ】${todayStr}の金融市場動向と世界3大市場の着目ポイント`;
 
-  console.log("【3/4】Wix RichContent形式に構造化して送信中...");
+  console.log("【3/4】Wix RichContent形式に構造化（余白制御）して送信中...");
 
   const memberId = await getWixMemberId();
   const richContentNodes = parseMarkdownToWixNodes(cleanMd);
