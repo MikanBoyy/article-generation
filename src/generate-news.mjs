@@ -44,12 +44,14 @@ async function fetchMarketNews() {
   throw new Error("すべてのニュースソースからの取得に失敗しました。");
 }
 
-// 2. 指定モデル（gemini-flash-latest / gemini-pro-latest）による記事生成
+// 2. 無料枠で確実に動作する Flash 系モデル群による記事生成
 async function generateArticleWithGemini(prompt) {
-  // ユーザー指定の優先モデル
   const priorityOrder = [
+    "models/gemini-3.7-flash",
+    "models/gemini-3.5-flash",
+    "models/gemini-3.6-flash",
     "models/gemini-flash-latest",
-    "models/gemini-pro-latest",
+    "models/gemini-3.1-flash-lite",
   ];
 
   const systemInstruction = `あなたは金融情報メディア「投資の種」の専属マーケットアナリストです。
@@ -57,10 +59,9 @@ async function generateArticleWithGemini(prompt) {
 思考プロセス、考察メモ、英語の解説、マークダウンのコードブロック（\`\`\`markdown 等）は一切出力せず、指定された構成の【日本語の記事本文のみ】を出力してください。`;
 
   for (const modelName of priorityOrder) {
-    // 一時的な混雑（High demand）対策として各モデル最大3回リトライ
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        console.log(`記事生成を試行中: ${modelName} (試行回数: ${attempt}/3)`);
+        console.log(`記事生成を試行中: ${modelName} (試行回数: ${attempt}/2)`);
         const generateUrl = `https://generativelanguage.googleapis.com/v1beta/${modelName}:generateContent?key=${GEMINI_API_KEY}`;
 
         const genRes = await axios.post(
@@ -71,7 +72,7 @@ async function generateArticleWithGemini(prompt) {
             },
             contents: [{ parts: [{ text: prompt }] }],
             generationConfig: {
-              temperature: 0.4,
+              temperature: 0.3,
             },
           },
           {
@@ -89,18 +90,17 @@ async function generateArticleWithGemini(prompt) {
         const errMsg = err.response?.data?.error?.message || err.message;
         console.warn(`モデル [${modelName}] 試行${attempt} エラー: ${errMsg}`);
 
-        // 一時的な混雑の場合は3秒待機して再試行
-        if (errMsg.includes("high demand") || errMsg.includes("503") || errMsg.includes("Resource has been exhausted")) {
-          console.log("混雑のため3秒待機して再試行します...");
-          await new Promise((resolve) => setTimeout(resolve, 3000));
+        if (errMsg.includes("high demand") || errMsg.includes("503")) {
+          console.log("混雑のため2秒待機して再試行します...");
+          await new Promise((resolve) => setTimeout(resolve, 2000));
         } else {
-          break; // クォータ上限等の別エラーの場合は次のモデルへ移行
+          break; // クォータ制限などの場合は即座に次のモデルへフォールバック
         }
       }
     }
   }
 
-  throw new Error("指定されたGeminiモデルでの記事生成に失敗しました。");
+  throw new Error("利用可能なすべてのGeminiモデルでの記事生成に失敗しました。");
 }
 
 // 3. インライン装飾（太字 **text**）のパース処理
