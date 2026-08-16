@@ -40,56 +40,60 @@ async function fetchMarketNews() {
   throw new Error("すべてのニュースソースからの取得に失敗しました。");
 }
 
-// 2. 利用可能なGeminiモデルを自動検出して記事生成
+// 2. 利用可能なGeminiモデルで順次試行して記事生成
 async function generateArticleWithGemini(prompt) {
   console.log("利用可能なGeminiモデルをAPIから自動照会中...");
   
-  // 利用可能なモデル一覧を取得
   const modelsRes = await axios.get(
     `https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}`
   );
 
-  const availableModels = (modelsRes.data.models || [])
+  const allModels = (modelsRes.data.models || [])
     .filter((m) => m.supportedGenerationMethods && m.supportedGenerationMethods.includes("generateContent"))
     .map((m) => m.name);
 
-  console.log("現在利用可能なモデル:", availableModels.join(", "));
+  // 優先的に試行する推奨モデル順序
+  const priorityOrder = [
+    "models/gemini-flash-latest",
+    "models/gemini-pro-latest",
+  ];
 
-  if (availableModels.length === 0) {
-    throw new Error("利用可能な生成モデルが見つかりませんでした。APIキーを確認してください。");
-  }
+  // 優先モデル + その他の利用可能モデル順に並べ替え
+  const candidateModels = [
+    ...priorityOrder.filter((m) => allModels.includes(m)),
+    ...allModels.filter((m) => !priorityOrder.includes(m) && !m.includes("tts") && !m.includes("image")),
+  ];
 
-  // Flash系・Pro系から優先して選択（なければリスト先頭のモデルを採用）
-  const selectedModel =
-    availableModels.find((m) => m.includes("flash") && !m.includes("8b")) ||
-    availableModels.find((m) => m.includes("pro")) ||
-    availableModels[0];
-
-  console.log(`記事生成に使用するモデル: ${selectedModel}`);
-
-  // 直接 REST API で生成リクエスト
-  const generateUrl = `https://generativelanguage.googleapis.com/v1beta/${selectedModel}:generateContent?key=${GEMINI_API_KEY}`;
-  
-  const genRes = await axios.post(
-    generateUrl,
-    {
-      contents: [
+  for (const modelName of candidateModels) {
+    try {
+      console.log(`記事生成を試行中: ${modelName}`);
+      const generateUrl = `https://generativelanguage.googleapis.com/v1beta/${modelName}:generateContent?key=${GEMINI_API_KEY}`;
+      
+      const genRes = await axios.post(
+        generateUrl,
         {
-          parts: [{ text: prompt }],
+          contents: [
+            {
+              parts: [{ text: prompt }],
+            },
+          ],
         },
-      ],
-    },
-    {
-      headers: { "Content-Type": "application/json" },
-    }
-  );
+        {
+          headers: { "Content-Type": "application/json" },
+        }
+      );
 
-  const text = genRes.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) {
-    throw new Error("Geminiからの生成結果が空でした。");
+      const text = genRes.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (text && text.trim().length > 0) {
+        console.log(`モデル [${modelName}] で記事生成に成功しました！`);
+        return text;
+      }
+    } catch (err) {
+      console.warn(`モデル [${modelName}] でのエラー: ${err.response?.data?.error?.message || err.message}`);
+    }
   }
 
-  return text;
+  throw new Error("すべてのGeminiモデルでの生成に失敗しました。");
 }
 
 async function runPipeline() {
