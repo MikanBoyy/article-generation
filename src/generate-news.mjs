@@ -1,4 +1,3 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import Parser from "rss-parser";
 import axios from "axios";
 
@@ -7,8 +6,6 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const WIX_API_KEY = process.env.WIX_API_KEY;
 const WIX_SITE_ID = process.env.WIX_SITE_ID;
 const WIX_CATEGORY_ID = process.env.WIX_CATEGORY_ID;
-
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
 const parser = new Parser({
   headers: {
@@ -43,31 +40,56 @@ async function fetchMarketNews() {
   throw new Error("すべてのニュースソースからの取得に失敗しました。");
 }
 
-// 2. Gemini APIによる記事生成（フォールバック対応）
+// 2. 利用可能なGeminiモデルを自動検出して記事生成
 async function generateArticleWithGemini(prompt) {
-  const candidateModels = [
-    "gemini-2.0-flash",
-    "gemini-1.5-pro",
-    "gemini-1.5-flash-002",
-    "gemini-pro"
-  ];
+  console.log("利用可能なGeminiモデルをAPIから自動照会中...");
+  
+  // 利用可能なモデル一覧を取得
+  const modelsRes = await axios.get(
+    `https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}`
+  );
 
-  for (const modelName of candidateModels) {
-    try {
-      console.log(`Gemini モデル試行中: ${modelName}`);
-      const model = genAI.getGenerativeModel({ model: modelName });
-      const result = await model.generateContent(prompt);
-      const text = result.response.text();
-      if (text && text.trim().length > 0) {
-        console.log(`モデル [${modelName}] で記事生成に成功しました。`);
-        return text;
-      }
-    } catch (err) {
-      console.warn(`モデル [${modelName}] 失敗: ${err.message}。次のモデルを試します。`);
-    }
+  const availableModels = (modelsRes.data.models || [])
+    .filter((m) => m.supportedGenerationMethods && m.supportedGenerationMethods.includes("generateContent"))
+    .map((m) => m.name);
+
+  console.log("現在利用可能なモデル:", availableModels.join(", "));
+
+  if (availableModels.length === 0) {
+    throw new Error("利用可能な生成モデルが見つかりませんでした。APIキーを確認してください。");
   }
 
-  throw new Error("利用可能なすべてのGeminiモデルでの記事生成に失敗しました。");
+  // Flash系・Pro系から優先して選択（なければリスト先頭のモデルを採用）
+  const selectedModel =
+    availableModels.find((m) => m.includes("flash") && !m.includes("8b")) ||
+    availableModels.find((m) => m.includes("pro")) ||
+    availableModels[0];
+
+  console.log(`記事生成に使用するモデル: ${selectedModel}`);
+
+  // 直接 REST API で生成リクエスト
+  const generateUrl = `https://generativelanguage.googleapis.com/v1beta/${selectedModel}:generateContent?key=${GEMINI_API_KEY}`;
+  
+  const genRes = await axios.post(
+    generateUrl,
+    {
+      contents: [
+        {
+          parts: [{ text: prompt }],
+        },
+      ],
+    },
+    {
+      headers: { "Content-Type": "application/json" },
+    }
+  );
+
+  const text = genRes.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) {
+    throw new Error("Geminiからの生成結果が空でした。");
+  }
+
+  return text;
 }
 
 async function runPipeline() {
