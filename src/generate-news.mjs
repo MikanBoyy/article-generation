@@ -338,7 +338,7 @@ ${newsContext}
 
 ---
 ※本記事は情報提供を目的としており、投資勧誘を目的としたものではありません。投資判断はご自身の責任で行ってください。
-出典・引用：Yahoo!ニュース / NHK NEWS / 各社報道（参照した記事URLを箇条書きで列挙）
+出典・引用：Yahoo!ニュース / 各社報道（参照した記事URLを箇条書きで列挙）
 `;
 
   const rawArticleMd = await generateArticleWithGemini(prompt);
