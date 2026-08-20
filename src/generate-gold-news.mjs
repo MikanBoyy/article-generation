@@ -1,13 +1,18 @@
 import Parser from "rss-parser";
 import axios from "axios";
+import { chromium } from "playwright";
 
 // 環境変数の取得
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const WIX_API_KEY = process.env.WIX_API_KEY;
 const WIX_SITE_ID = process.env.WIX_SITE_ID;
-const WIX_CATEGORY_ID = process.env.WIX_CATEGORY_ID; // ゴールド用カテゴリIDを secrets で上書き可能
+const WIX_CATEGORY_ID = process.env.WIX_CATEGORY_ID; // 共通カテゴリ
+const WIX_GOLD_CATEGORY_ID = process.env.WIX_GOLD_CATEGORY_ID; // ゴールド専用カテゴリ
 const WIX_MEMBER_ID = process.env.WIX_MEMBER_ID;
 const POST_STATUS = process.env.POST_STATUS || "draft"; // 'publish' または 'draft'
+
+// Wix API呼び出しの共通タイムアウト（ジョブハング防止）
+const WIX_API_TIMEOUT = 30000;
 
 const parser = new Parser({
   headers: {
@@ -18,10 +23,11 @@ const parser = new Parser({
   timeout: 10000,
 });
 
-// 外部チャート画像（TradingView公式ウィジェットのスクリーンショット）
-// 生成直後のNYクローズ時点の日足チャートが表示される
-const CHART_IMAGE_URL =
+// TradingView公式ウィジェット（HTMLページ。Playwrightで実際にレンダリングしてスクリーンショットする）
+const CHART_WIDGET_URL =
   "https://s.tradingview.com/widgetembed/?symbol=OANDA%3AXAUUSD&interval=D&theme=light&style=1&timezone=Asia%2FTokyo&withdateranges=1";
+const CHART_WIDTH = 900;
+const CHART_HEIGHT = 500;
 
 // 1. ゴールド相場の実データ取得（無料API / キー不要）
 async function fetchGoldMarketData() {
@@ -237,16 +243,90 @@ function createEmptyLineNode() {
   };
 }
 
-// 5b. 画像ノードの生成ヘルパー（外部URL画像をWix RichContentに埋め込む）
-function createImageNode(srcUrl, altText) {
+// 5b. 画像ノードの生成ヘルパー（Wixメディアマネージャーにアップロード済みの画像を埋め込む）
+// ※Wix BlogのIMAGEノードは外部URLを受け付けず、wix:image://v1/... 形式が必須
+function createImageNode(wixImageSrc, altText, width, height) {
   return {
     type: "IMAGE",
     imageData: {
       containerData: { alignment: "CENTER", width: { size: "CONTENT" } },
-      image: { src: { url: srcUrl } },
+      image: { src: wixImageSrc },
       altText: altText,
+      metadata: { width: width, height: height },
     },
   };
+}
+
+// 5c. プレーンテキスト段落の生成ヘルパー（チャート失敗時のフォールバック用）
+function createTextParagraph(text) {
+  return {
+    type: "PARAGRAPH",
+    nodes: [{ type: "TEXT", textData: { text, decorations: [] } }],
+  };
+}
+
+// 5d. PlaywrightでTradingViewウィジェットを実レンダリングしてスクリーンショット取得
+async function captureGoldChart() {
+  let browser = null;
+  try {
+    console.log("TradingViewチャートのスクリーンショット取得中...");
+    browser = await chromium.launch();
+    const page = await browser.newPage({
+      viewport: { width: CHART_WIDTH, height: CHART_HEIGHT },
+    });
+    await page.goto(CHART_WIDGET_URL, { waitUntil: "networkidle", timeout: 45000 });
+    // チャート描画待機
+    await page.waitForTimeout(4000);
+    const buffer = await page.screenshot({ type: "png" });
+    console.log(`チャート画像取得完了（${buffer.length} bytes）`);
+    return buffer;
+  } catch (e) {
+    console.warn(`チャート画像の取得に失敗しました: ${e.message}`);
+    return null;
+  } finally {
+    if (browser) {
+      try {
+        await browser.close();
+      } catch (e) {}
+    }
+  }
+}
+
+// 5e. Wixメディアマネージャーへ画像をアップロードし、wix:image://v1/... URIを取得
+async function uploadImageToWix(pngBuffer, fileName) {
+  const headers = {
+    Authorization: WIX_API_KEY,
+    "wix-site-id": WIX_SITE_ID,
+    "Content-Type": "application/json",
+  };
+
+  // 1. アップロードURLの発行
+  const genRes = await axios.post(
+    "https://www.wixapis.com/site-media/v1/files/generate-upload-url",
+    { mimeType: "image/png", fileName: fileName },
+    { headers, timeout: WIX_API_TIMEOUT }
+  );
+  const uploadUrl = genRes.data?.uploadUrl;
+  if (!uploadUrl) {
+    throw new Error("WixメディアのアップロードURL発行に失敗しました。");
+  }
+
+  // 2. バイナリをアップロード
+  const upRes = await axios.put(uploadUrl, pngBuffer, {
+    headers: { "Content-Type": "image/png" },
+    timeout: 60000,
+    maxBodyLength: Infinity,
+  });
+  const file = upRes.data?.file;
+  const filePath = file?.path || file?.url?.split("/media/")?.[1];
+  if (!filePath) {
+    throw new Error("Wixメディアへのアップロード結果からファイルパスを取得できませんでした。");
+  }
+
+  // Ricos形式の画像URI: wix:image://v1/<path>/<name>#originWidth=W&originHeight=H
+  const src = `wix:image://v1/${filePath}/${fileName}#originWidth=${CHART_WIDTH}&originHeight=${CHART_HEIGHT}`;
+  console.log(`Wixメディアへのアップロード完了: ${src}`);
+  return src;
 }
 
 // 6. MarkdownをWix RichContentに変換（セクション・見出し間の余白制御）
@@ -351,7 +431,10 @@ async function getWixMemberId() {
   };
 
   try {
-    const res = await axios.get("https://www.wixapis.com/blog/v3/draft-posts?paging.limit=10", { headers });
+    const res = await axios.get("https://www.wixapis.com/blog/v3/draft-posts?paging.limit=10", {
+      headers,
+      timeout: WIX_API_TIMEOUT,
+    });
     const drafts = res.data.draftPosts || [];
     for (const d of drafts) {
       if (d.memberId) return d.memberId;
@@ -359,7 +442,10 @@ async function getWixMemberId() {
   } catch (e) {}
 
   try {
-    const res = await axios.get("https://www.wixapis.com/blog/v3/posts?paging.limit=10", { headers });
+    const res = await axios.get("https://www.wixapis.com/blog/v3/posts?paging.limit=10", {
+      headers,
+      timeout: WIX_API_TIMEOUT,
+    });
     const posts = res.data.posts || [];
     for (const p of posts) {
       if (p.memberId) return p.memberId;
@@ -367,7 +453,10 @@ async function getWixMemberId() {
   } catch (e) {}
 
   try {
-    const res = await axios.get("https://www.wixapis.com/members/v1/members?paging.limit=10", { headers });
+    const res = await axios.get("https://www.wixapis.com/members/v1/members?paging.limit=10", {
+      headers,
+      timeout: WIX_API_TIMEOUT,
+    });
     const members = res.data.members || [];
     if (members.length > 0 && members[0].id) return members[0].id;
   } catch (e) {}
@@ -430,6 +519,12 @@ ${newsContext}
 思考プロセスや前置きは一切含めず、以下のMarkdown構造のみを出力してください（コードブロック \`\`\` は使わない）。
 ※全体の分量は【本文2,500〜3,000文字程度】（5分で読めるボリューム）に厳密に収めてください。各セクションは簡潔に、冗長な表現は避けてください。
 ※表形式（Markdownテーブル）は使用禁止です。必ず箇条書き（* ）で記述してください。
+※【箇条書きの厳格ルール】
+  - 箇条書きは必ず行頭を半角「* 」（アスタリスク＋半角スペース1つ）で開始すること。「- 」「・」は使用禁止。
+  - ネスト（インデント付きの入れ子箇条書き）は絶対に使用しないこと。すべての箇条書きは行頭から開始するフラット構造にすること。
+  - 1つの箇条書き項目の中で改行しないこと。1項目＝1行で完結させること。
+  - 箇条書きの前後には必ず空行を1行入れること。
+  - 見出し記号（#）の後は必ず半角スペース1つ（例: ## セクション1：前日のゴールド）。
 ※価格はドル建て（$/オンス）表記のみ。円建て換算は不要です。
 ※英語ソースのニュースは日本語に翻訳・要約して記述してください。
 ※チャート画像はスクリプト側で挿入するため、本文中に画像やプレースホルダーを含めないでください。
@@ -501,29 +596,58 @@ ${newsContext}
   const richContentNodes = parseMarkdownToWixNodes(cleanMd);
 
   // セクション1（前日のゴールド）の直後にチャート画像を挿入
+  // Wixの画像ノードは外部URL不可のため、Playwrightで実スクリーンショット→Wixメディアにアップロードして挿入
+  const chartBuffer = await captureGoldChart();
+  let chartImageSrc = null;
+  if (chartBuffer) {
+    try {
+      chartImageSrc = await uploadImageToWix(chartBuffer, "gold-chart.png");
+    } catch (e) {
+      console.warn(`チャート画像のWixアップロードに失敗しました: ${e.message}`);
+    }
+  }
+
   const section1Index = richContentNodes.findIndex(
     (n) =>
       n.type === "HEADING" &&
       n.nodes?.[0]?.textData?.text?.includes("セクション1")
   );
-  if (section1Index !== -1) {
-    // 見出し直後の空行ノードを挟んで画像を挿入
-    const insertPos = section1Index + 1;
-    richContentNodes.splice(
-      insertPos,
-      0,
-      createImageNode(CHART_IMAGE_URL, "XAU/USD 日足チャート（TradingView）"),
-      createEmptyLineNode()
+
+  if (chartImageSrc) {
+    const chartNode = createImageNode(
+      chartImageSrc,
+      "XAU/USD 日足チャート（TradingView）",
+      CHART_WIDTH,
+      CHART_HEIGHT
     );
-    console.log("チャート画像ノードをセクション1に挿入しました。");
+    if (section1Index !== -1) {
+      // 見出し直後の空行ノードを挟んで画像を挿入
+      richContentNodes.splice(section1Index + 1, 0, chartNode, createEmptyLineNode());
+    } else {
+      console.warn("セクション1の見出しが見つからないため、チャート画像は記事末尾に追加します。");
+      richContentNodes.push(createEmptyLineNode(), chartNode);
+    }
+    console.log("チャート画像ノードを挿入しました。");
   } else {
-    console.warn("セクション1の見出しが見つからないため、チャート画像は記事末尾に追加します。");
-    richContentNodes.push(createEmptyLineNode());
-    richContentNodes.push(createImageNode(CHART_IMAGE_URL, "XAU/USD 日足チャート（TradingView）"));
+    // 画像取得・アップロードに失敗した場合はリンクテキストでフォールバック
+    console.warn("チャート画像を挿入できないため、代わりにリンクテキストを挿入します。");
+    const fallbackNode = createTextParagraph(
+      `※チャート画像の生成に失敗しました。XAU/USDチャートはこちら: ${CHART_WIDGET_URL}`
+    );
+    if (section1Index !== -1) {
+      richContentNodes.splice(section1Index + 1, 0, fallbackNode, createEmptyLineNode());
+    } else {
+      richContentNodes.push(createEmptyLineNode(), fallbackNode);
+    }
   }
 
   const wixUrl = "https://www.wixapis.com/blog/v3/draft-posts";
-  const categoryList = WIX_CATEGORY_ID && WIX_CATEGORY_ID.trim().length > 0 ? [WIX_CATEGORY_ID.trim()] : [];
+  // 共通カテゴリとゴールド専用カテゴリの両方を付与（重複排除）
+  const categoryList = [WIX_CATEGORY_ID, WIX_GOLD_CATEGORY_ID]
+    .filter((id) => id && id.trim().length > 0)
+    .map((id) => id.trim())
+    .filter((id, index, arr) => arr.indexOf(id) === index);
+  console.log(`付与カテゴリ: ${categoryList.length > 0 ? categoryList.join(", ") : "なし"}`);
 
   const payload = {
     draftPost: {
@@ -543,6 +667,7 @@ ${newsContext}
       "wix-site-id": WIX_SITE_ID,
       "Content-Type": "application/json",
     },
+    timeout: WIX_API_TIMEOUT,
   });
 
   const draftId = response.data.draftPost?.id;
@@ -561,12 +686,17 @@ ${newsContext}
           "wix-site-id": WIX_SITE_ID,
           "Content-Type": "application/json",
         },
+        timeout: WIX_API_TIMEOUT,
       }
     );
     console.log(`🎉 記事を公開（Published）しました！ (Post ID: ${draftId})`);
   } else {
     console.log(`🎉 記事を下書き（Draft）として保存しました！ (Draft ID: ${draftId})`);
   }
+
+  // axiosのkeep-aliveソケット等でプロセスが残留しないよう明示的に終了（GitHub Actionsのジョブハング防止）
+  console.log("パイプライン正常終了。");
+  process.exit(0);
 }
 
 runPipeline().catch((err) => {
