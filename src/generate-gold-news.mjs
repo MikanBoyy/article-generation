@@ -296,6 +296,7 @@ async function captureGoldChart() {
 }
 
 // 5e. Wixメディアマネージャーへ画像をアップロードし、wix:image://v1/... URIを取得
+// アップロード直後はファイルが処理中（PENDING）のため、READYになるまでポーリングしてからURIを返す
 async function uploadImageToWix(pngBuffer, fileName) {
   const headers = {
     Authorization: WIX_API_KEY,
@@ -306,7 +307,12 @@ async function uploadImageToWix(pngBuffer, fileName) {
   // 1. アップロードURLの発行
   const genRes = await axios.post(
     "https://www.wixapis.com/site-media/v1/files/generate-upload-url",
-    { mimeType: "image/png", fileName: fileName },
+    {
+      mimeType: "image/png",
+      fileName: fileName,
+      private: false,
+      sizeInBytes: String(pngBuffer.length),
+    },
     { headers, timeout: WIX_API_TIMEOUT }
   );
   const uploadUrl = genRes.data?.uploadUrl;
@@ -314,18 +320,54 @@ async function uploadImageToWix(pngBuffer, fileName) {
     throw new Error("WixメディアのアップロードURL発行に失敗しました。");
   }
 
-  // 2. バイナリをアップロード
-  const upRes = await axios.put(uploadUrl, pngBuffer, {
+  // 2. バイナリをアップロード（filenameクエリパラメータ付与）
+  const uploadUrlWithName = uploadUrl.includes("?")
+    ? `${uploadUrl}&filename=${encodeURIComponent(fileName)}`
+    : `${uploadUrl}?filename=${encodeURIComponent(fileName)}`;
+  const upRes = await axios.put(uploadUrlWithName, pngBuffer, {
     headers: { "Content-Type": "image/png" },
     timeout: 60000,
     maxBodyLength: Infinity,
   });
   const file = upRes.data?.file;
-  // generate-upload-url のレスポンスからメディアID（例: 4a9a75_xxx~mv2.png）を取得
+  // レスポンス例: file.id = "4a9a75_xxx~mv2.png"
   const mediaId = file?.id || file?.url?.match(/\/media\/([^/]+)$/)?.[1];
   if (!mediaId) {
     console.warn("Wixメディアのアップロードレスポンス:", JSON.stringify(upRes.data));
     throw new Error("Wixメディアへのアップロード結果からメディアIDを取得できませんでした。");
+  }
+  console.log(`Wixメディアアップロード受理（処理中）: ${mediaId} / status=${file?.operationStatus || "不明"}`);
+
+  // 3. ファイルが READY になるまでポーリング（最大30秒・2秒間隔）
+  //    アップロード直後は処理中のため、READY前に記事へ挿入すると画像が空白表示になる
+  const maxAttempts = 15;
+  for (let i = 1; i <= maxAttempts; i++) {
+    try {
+      const descRes = await axios.get(
+        `https://www.wixapis.com/site-media/v1/files/${encodeURIComponent(mediaId)}`,
+        { headers, timeout: WIX_API_TIMEOUT }
+      );
+      const status = descRes.data?.file?.operationStatus;
+      if (status === "READY") {
+        console.log(`ファイル処理完了（READY）: ${mediaId}（${i}回目で確認）`);
+        break;
+      }
+      if (status === "FAILED") {
+        throw new Error(`Wixメディアのファイル処理に失敗しました: ${mediaId}`);
+      }
+      if (i === maxAttempts) {
+        console.warn(`READY確認がタイムアウトしました（${maxAttempts}回）。処理中のまま続行します。`);
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      }
+    } catch (pollErr) {
+      if (pollErr.message.includes("ファイル処理に失敗")) throw pollErr;
+      if (i === maxAttempts) {
+        console.warn(`READY確認ポーリングでエラー: ${pollErr.message}。処理中のまま続行します。`);
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      }
+    }
   }
 
   // Ricos形式の画像URI: wix:image://v1/<mediaId>/<fileName>#originWidth=W&originHeight=H
