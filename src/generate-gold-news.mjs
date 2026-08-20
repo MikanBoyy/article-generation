@@ -244,14 +244,15 @@ function createEmptyLineNode() {
 }
 
 // 5b. 画像ノードの生成ヘルパー（Wixメディアマネージャーにアップロード済みの画像を埋め込む）
-// Wix公式スキーマ: imageData.image は Media 型（src: {id}、width/height は整数で Media 直下）
-function createImageNode(wixImageSrc, altText, width, height) {
+// Wix公式スキーマ: imageData.image は Media 型。src.id にはファイルIDのみ（フルURIではない）を指定
+function createImageNode(mediaId, staticUrl, altText, width, height) {
   return {
     type: "IMAGE",
     imageData: {
       containerData: { alignment: "CENTER", width: { size: "CONTENT" } },
       image: {
-        src: { id: wixImageSrc },
+        // FileSource: id にはファイルID（例: 4a9a75_xxx~mv2.png）のみを指定
+        src: { id: mediaId, url: staticUrl },
         width: width,
         height: height,
       },
@@ -332,6 +333,7 @@ async function uploadImageToWix(pngBuffer, fileName) {
   const file = upRes.data?.file;
   // レスポンス例: file.id = "4a9a75_xxx~mv2.png"
   const mediaId = file?.id || file?.url?.match(/\/media\/([^/]+)$/)?.[1];
+  let staticUrl = file?.url || null;
   if (!mediaId) {
     console.warn("Wixメディアのアップロードレスポンス:", JSON.stringify(upRes.data));
     throw new Error("Wixメディアへのアップロード結果からメディアIDを取得できませんでした。");
@@ -347,7 +349,10 @@ async function uploadImageToWix(pngBuffer, fileName) {
         `https://www.wixapis.com/site-media/v1/files/${encodeURIComponent(mediaId)}`,
         { headers, timeout: WIX_API_TIMEOUT }
       );
-      const status = descRes.data?.file?.operationStatus;
+      const descFile = descRes.data?.file;
+      const status = descFile?.operationStatus;
+      // descriptorから最新のURLも取得しておく
+      if (descFile?.url) staticUrl = descFile.url;
       if (status === "READY") {
         console.log(`ファイル処理完了（READY）: ${mediaId}（${i}回目で確認）`);
         break;
@@ -370,10 +375,9 @@ async function uploadImageToWix(pngBuffer, fileName) {
     }
   }
 
-  // Ricos形式の画像URI: wix:image://v1/<mediaId>/<fileName>#originWidth=W&originHeight=H
-  const src = `wix:image://v1/${mediaId}/${fileName}#originWidth=${CHART_WIDTH}&originHeight=${CHART_HEIGHT}`;
-  console.log(`Wixメディアへのアップロード完了: ${src}`);
-  return src;
+  // Ricos参照に必要な情報を返す（ファイルID と 静的URL の両方）
+  console.log(`Wixメディアへのアップロード完了: id=${mediaId} / url=${staticUrl || "未取得"}`);
+  return { mediaId, staticUrl };
 }
 
 // 6. MarkdownをWix RichContentに変換（セクション・見出し間の余白制御）
@@ -645,10 +649,10 @@ ${newsContext}
   // セクション1（前日のゴールド）の直後にチャート画像を挿入
   // Wixの画像ノードは外部URL不可のため、Playwrightで実スクリーンショット→Wixメディアにアップロードして挿入
   const chartBuffer = await captureGoldChart();
-  let chartImageSrc = null;
+  let uploadedChart = null;
   if (chartBuffer) {
     try {
-      chartImageSrc = await uploadImageToWix(chartBuffer, "gold-chart.png");
+      uploadedChart = await uploadImageToWix(chartBuffer, "gold-chart.png");
     } catch (e) {
       console.warn(`チャート画像のWixアップロードに失敗しました: ${e.message}`);
     }
@@ -660,9 +664,10 @@ ${newsContext}
       n.nodes?.[0]?.textData?.text?.includes("セクション1")
   );
 
-  if (chartImageSrc) {
+  if (uploadedChart) {
     const chartNode = createImageNode(
-      chartImageSrc,
+      uploadedChart.mediaId,
+      uploadedChart.staticUrl,
       "XAU/USD 日足チャート（TradingView）",
       CHART_WIDTH,
       CHART_HEIGHT
@@ -719,6 +724,29 @@ ${newsContext}
 
   const draftId = response.data.draftPost?.id;
   console.log(`下書き作成完了 (Draft ID: ${draftId || "OK"})`);
+
+  // 検証: Wixに保存された画像ノードの状態を確認（画像が空白の場合の切り分け用）
+  if (draftId && uploadedChart) {
+    try {
+      const verifyRes = await axios.get(
+        `https://www.wixapis.com/blog/v3/draft-posts/${draftId}?fieldsets=RICH_CONTENT`,
+        {
+          headers: { Authorization: WIX_API_KEY, "wix-site-id": WIX_SITE_ID },
+          timeout: WIX_API_TIMEOUT,
+        }
+      );
+      const savedImageNode = verifyRes.data?.draftPost?.richContent?.nodes?.find(
+        (n) => n.type === "IMAGE"
+      );
+      if (savedImageNode) {
+        console.log("保存された画像ノード:", JSON.stringify(savedImageNode.imageData, null, 2));
+      } else {
+        console.warn("保存されたドラフト内にIMAGEノードが見つかりませんでした。");
+      }
+    } catch (verifyErr) {
+      console.warn(`保存状態の検証に失敗: ${verifyErr.message}`);
+    }
+  }
 
   // 2. POST_STATUS が 'publish' の場合は即時公開
   if (POST_STATUS === "publish" && draftId) {
