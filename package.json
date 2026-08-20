@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "start": "node src/generate-news.mjs"
+    "start": "node src/generate-news.mjs",
+    "start:gold": "node src/generate-gold-news.mjs"
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
