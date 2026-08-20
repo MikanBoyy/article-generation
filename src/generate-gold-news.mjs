@@ -245,12 +245,13 @@ function createEmptyLineNode() {
 
 // 5b. 画像ノードの生成ヘルパー（Wixメディアマネージャーにアップロード済みの画像を埋め込む）
 // ※Wix BlogのIMAGEノードは外部URLを受け付けず、wix:image://v1/... 形式が必須
+// ※image.src は文字列ではなく { id: "..." } オブジェクト形式。metadata は imageData 直下に配置
 function createImageNode(wixImageSrc, altText, width, height) {
   return {
     type: "IMAGE",
     imageData: {
       containerData: { alignment: "CENTER", width: { size: "CONTENT" } },
-      image: { src: wixImageSrc },
+      image: { src: { id: wixImageSrc } },
       altText: altText,
       metadata: { width: width, height: height },
     },
@@ -318,13 +319,15 @@ async function uploadImageToWix(pngBuffer, fileName) {
     maxBodyLength: Infinity,
   });
   const file = upRes.data?.file;
-  const filePath = file?.path || file?.url?.split("/media/")?.[1];
-  if (!filePath) {
-    throw new Error("Wixメディアへのアップロード結果からファイルパスを取得できませんでした。");
+  // generate-upload-url のレスポンスからメディアID（例: 4a9a75_xxx~mv2.png）を取得
+  const mediaId = file?.id || file?.url?.match(/\/media\/([^/]+)$/)?.[1];
+  if (!mediaId) {
+    console.warn("Wixメディアのアップロードレスポンス:", JSON.stringify(upRes.data));
+    throw new Error("Wixメディアへのアップロード結果からメディアIDを取得できませんでした。");
   }
 
-  // Ricos形式の画像URI: wix:image://v1/<path>/<name>#originWidth=W&originHeight=H
-  const src = `wix:image://v1/${filePath}/${fileName}#originWidth=${CHART_WIDTH}&originHeight=${CHART_HEIGHT}`;
+  // Ricos形式の画像URI: wix:image://v1/<mediaId>/<fileName>#originWidth=W&originHeight=H
+  const src = `wix:image://v1/${mediaId}/${fileName}#originWidth=${CHART_WIDTH}&originHeight=${CHART_HEIGHT}`;
   console.log(`Wixメディアへのアップロード完了: ${src}`);
   return src;
 }
