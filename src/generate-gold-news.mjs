@@ -244,16 +244,18 @@ function createEmptyLineNode() {
 }
 
 // 5b. 画像ノードの生成ヘルパー（Wixメディアマネージャーにアップロード済みの画像を埋め込む）
-// ※Wix BlogのIMAGEノードは外部URLを受け付けず、wix:image://v1/... 形式が必須
-// ※image.src は文字列ではなく { id: "..." } オブジェクト形式。metadata は imageData 直下に配置
+// Wix公式スキーマ: imageData.image は Media 型（src: {id}、width/height は整数で Media 直下）
 function createImageNode(wixImageSrc, altText, width, height) {
   return {
     type: "IMAGE",
     imageData: {
       containerData: { alignment: "CENTER", width: { size: "CONTENT" } },
-      image: { src: { id: wixImageSrc } },
+      image: {
+        src: { id: wixImageSrc },
+        width: width,
+        height: height,
+      },
       altText: altText,
-      metadata: { width: width, height: height },
     },
   };
 }
