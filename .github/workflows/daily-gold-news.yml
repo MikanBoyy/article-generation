@@ -3,7 +3,7 @@ name: Daily Gold News Generator (Wix)
 on:
   schedule:
     # 毎日 UTC 22:00（日本時間 翌朝 07:00）に自動起動（通勤時間帯の閲覧習慣化）
-    - cron: '0 22 * * *'
+    - cron: '0 22 * * 1-5'
   workflow_dispatch:
     inputs:
       post_status:
